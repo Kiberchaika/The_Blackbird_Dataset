@@ -1,2 +1,4 @@
-# The_Blackbird_Dataset
-Large scale music dataset.
+# The *Blackbird* Dataset
+## Large scale music dataset.
+
+![Logo](./blackbird.jpg)

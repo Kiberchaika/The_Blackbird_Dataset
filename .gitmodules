@@ -1,0 +1,9 @@
+[submodule "SingingHackathonBackend"]
+	path = SingingHackathonBackend
+	url = https://github.com/Kiberchaika/SingingHackathonBackend
+[submodule "SingingHackathonMIR"]
+	path = SingingHackathonMIR
+	url = https://github.com/Kiberchaika/SingingHackathonMIR
+[submodule "F5-TTS-Fork"]
+	path = F5-TTS-Fork
+	url = git@github.com:Kiberchaika/F5-TTS-Fork.git

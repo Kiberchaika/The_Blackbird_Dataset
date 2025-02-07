@@ -4,6 +4,7 @@ from blackbird.dataset import Dataset
 from blackbird.schema import DatasetComponentSchema
 import json
 from tabulate import tabulate
+import sys
 
 def print_section(title):
     """Print a section header."""
@@ -18,6 +19,11 @@ def format_size(size_bytes):
             return f"{size_bytes:.1f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.1f} TB"
+
+def show_progress(msg: str):
+    """Show progress message."""
+    print(f"\r{msg}", file=sys.stderr, end="")
+    sys.stderr.flush()
 
 def main():
     # Initialize dataset with real path
@@ -80,7 +86,9 @@ def main():
             
     # Show some statistics
     print_section("Dataset Statistics")
-    stats = dataset.analyze()
+    print("Analyzing dataset (this may take a while)...")
+    stats = dataset.analyze(progress_callback=show_progress)
+    print("\nAnalysis complete!\n")  # New line after progress
     
     print(f"Total tracks: {stats['tracks']['total']}")
     print(f"Total size: {format_size(stats['total_size'])}")
@@ -103,7 +111,12 @@ def main():
     print_section("Track Search Examples")
     
     # 1. Find tracks with all components
-    complete_tracks = dataset.find_tracks(has=["instrumental", "vocals", "mir"])
+    print("Finding tracks with all components...")
+    complete_tracks = dataset.find_tracks(
+        has=["instrumental", "vocals", "mir"],
+        progress_callback=show_progress
+    )
+    print("\nSearch complete!")
     print(f"Tracks with all components: {len(complete_tracks)}")
     if complete_tracks:
         print("\nExample complete track:")
@@ -114,14 +127,21 @@ def main():
             print(f"- {f.name}")
             
     # 2. Find tracks missing vocals
-    missing_vocals = dataset.find_tracks(missing=["vocals"])
-    print(f"\nTracks missing vocals: {len(missing_vocals)}")
+    print("\nFinding tracks missing vocals...")
+    missing_vocals = dataset.find_tracks(
+        missing=["vocals"],
+        progress_callback=show_progress
+    )
+    print("\nSearch complete!")
+    print(f"Tracks missing vocals: {len(missing_vocals)}")
     
     # 3. Find CD albums
+    print("\nFinding CD albums...")
     cd_tracks = []
-    for track_id in dataset.find_tracks().keys():
+    for track_id in dataset.find_tracks(progress_callback=show_progress).keys():
         if "/CD" in track_id:
             cd_tracks.append(track_id)
+    print("\nSearch complete!")
     
     print(f"\nFound {len(cd_tracks)} tracks in CD albums")
     if cd_tracks:

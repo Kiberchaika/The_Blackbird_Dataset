@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 from collections import defaultdict
+import fnmatch
 
 
 @dataclass
@@ -326,13 +327,9 @@ class DatasetComponentSchema:
         # Remove component suffixes
         for suffix in ['_instrumental', '_vocals_noreverb', '_vocals_stretched_120bpm_section']:
             name = name.replace(suffix, '')
-        # Remove extensions
-        if name.endswith('.mp3'):
-            name = name[:-4]
-        elif name.endswith('.mir.json'):
-            name = name[:-9]  # Remove both .mir.json
-        elif name.endswith('.json'):
-            name = name[:-5]
+        # Remove extension (everything after the last dot)
+        if '.' in name:
+            name = name.rsplit('.', 1)[0]
         return name
 
     def _group_by_track(self, files: List[Path]) -> Dict[str, List[Path]]:
@@ -366,3 +363,388 @@ class DatasetComponentSchema:
                 if self._get_base_name(f.name) == base_name:
                     companions.append(f)
         return sorted(companions)
+
+    def discover_schema(self, folders: Optional[List[str]] = None) -> SchemaValidationResult:
+        """Analyze dataset to discover and generate a schema that matches its structure.
+        
+        This method:
+        1. Scans the dataset directory structure
+        2. Identifies unique file patterns
+        3. Determines required/optional components
+        4. Generates appropriate glob patterns
+        
+        Args:
+            folders: Optional list of folders to analyze (e.g. ["Artist1/Album1"]).
+                    If None, analyzes entire dataset.
+        
+        Returns:
+            SchemaValidationResult with discovered schema and statistics
+        """
+        result = SchemaValidationResult()
+        discovered_components = {}
+        
+        # Find all files in dataset
+        if folders:
+            # Only scan specified folders
+            all_files = []
+            for folder in folders:
+                folder_path = self.dataset_path / folder
+                if not folder_path.exists():
+                    result.add_warning(f"Folder not found: {folder}")
+                    continue
+                all_files.extend(folder_path.rglob("*"))
+        else:
+            # Scan entire dataset
+            all_files = list(self.dataset_path.rglob("*"))
+
+        # First find all instrumental files to determine total tracks
+        instrumental_files = [f for f in all_files if f.is_file() and f.name.endswith('_instrumental.mp3')]
+        total_tracks = len(instrumental_files)  # Each track should have exactly one instrumental file
+        if total_tracks == 0:
+            result.add_error("No tracks found in the specified folders")
+            return result
+
+        # Track all unique track paths
+        all_track_paths = {self._get_track_path(f) for f in instrumental_files}
+        
+        print("\nFound instrumental files:")
+        for f in instrumental_files:
+            print(f"  {f.name} -> {self._get_track_path(f)}")
+        print(f"\nTotal tracks: {total_tracks}")
+        print(f"Unique track paths: {len(all_track_paths)}")
+
+        # First pass: Group files by their base pattern to identify components
+        files_by_base_pattern = defaultdict(list)
+        
+        for file in all_files:
+            if file.is_file():
+                # Skip hidden files and directories
+                if any(part.startswith('.') for part in file.parts):
+                    continue
+                
+                # Get track path for this file
+                track_path = self._get_track_path(file)
+                
+                # Get the base name and analyze the suffix
+                base_name = file.stem.split('_')[0]
+                remaining = file.name[len(base_name):]
+                
+                # Skip if no pattern to analyze
+                if not remaining:
+                    continue
+                
+                # Split into meaningful parts
+                parts = remaining.split('_')
+                if len(parts) > 1:  # Has component identifiers
+                    # Extract the main component identifier
+                    component_parts = []
+                    for part in parts[1:]:
+                        if 'section' in part:
+                            break  # Stop at section marker
+                        if not any(c.isdigit() for c in part):
+                            component_parts.append(part)
+                    
+                    if component_parts:
+                        component_id = '_'.join(component_parts)
+                        # Don't include extension in component name
+                        component_id = component_id.split('.')[0]
+                        
+                        # Get the extension (without the dot)
+                        extension = file.suffix.lstrip('.')
+                        
+                        # Create component ID with extension
+                        if extension == 'json':
+                            component_id = f"{component_id}_lyrics"  # Special case for JSON files containing lyrics
+                        elif extension == 'mp3':
+                            component_id = f"{component_id}_audio"  # Audio files
+                        
+                        # Special case for instrumental files
+                        if 'instrumental' in component_id.lower():
+                            if extension == 'mp3':
+                                files_by_base_pattern['instrumental_audio'].append(file)
+                            elif extension == 'json':
+                                files_by_base_pattern['instrumental_lyrics'].append(file)
+                        else:
+                            files_by_base_pattern[component_id].append(file)
+                        
+                        # If this is a section file, also add to sections group
+                        if 'section' in remaining:
+                            section_id = f"{component_id}_section"
+                            files_by_base_pattern[section_id].append(file)
+                
+                elif file.name.endswith('.mir.json'):  # Special case for MIR files
+                    files_by_base_pattern['mir'].append(file)
+                
+                # Also check for instrumental files in the full name
+                if '_instrumental.' in file.name.lower():
+                    if file.suffix.lower() == '.mp3':
+                        files_by_base_pattern['instrumental_audio'].append(file)
+                    elif file.suffix.lower() == '.json':
+                        files_by_base_pattern['instrumental_lyrics'].append(file)
+        
+        # Calculate total tracks from unique track paths
+        total_tracks = len(all_track_paths)
+        if total_tracks == 0:
+            result.add_error("No tracks found in the specified folders")
+            return result
+
+        # Second pass: Analyze each component group to determine patterns and properties
+        for base_pattern, files in files_by_base_pattern.items():
+            # Skip if very few files with this pattern
+            if len(files) < total_tracks * 0.05:  # Less than 5% coverage
+                continue
+            
+            # Analyze file patterns in this group
+            extensions = {f.suffix for f in files}
+            has_sections = 'section' in base_pattern
+            
+            # Generate component name
+            component_name = base_pattern.lower()
+            if not component_name.isidentifier():
+                component_name = ''.join(c for c in component_name if c.isalnum() or c == '_')
+                if not component_name.isidentifier():
+                    continue
+            
+            # Generate pattern based on file analysis
+            if has_sections:
+                # Files with numbered sections
+                pattern = f"*_{base_pattern.replace('_section', '')}_*section*{next(iter(extensions))}"  # Use the first extension
+            elif component_name == 'mir':
+                pattern = "*.mir.json"
+            elif '_audio' in component_name:
+                pattern = f"*_{base_pattern.replace('_audio', '')}.mp3"
+            elif '_lyrics' in component_name:
+                pattern = f"*_{base_pattern.replace('_lyrics', '')}.json"
+            else:
+                # Regular component files - use specific extension
+                pattern = f"*_{base_pattern}{next(iter(extensions))}"  # Use the first extension
+            
+            # Group files by track for coverage calculation
+            tracks_with_component = defaultdict(list)
+            for file in files:
+                track_path = self._get_track_path(file)
+                tracks_with_component[track_path].append(file)
+            
+            # Calculate coverage based on unique tracks
+            track_coverage = len(tracks_with_component) / total_tracks if total_tracks > 0 else 0
+            
+            # Determine if multiple files per track exist
+            has_multiple = max(len(files) for files in tracks_with_component.values()) > 1
+            
+            # Add component to discovered schema
+            discovered_components[component_name] = {
+                "pattern": pattern,
+                "multiple": has_multiple or has_sections or component_name in ['vocals_noreverb', 'instrumental'],  # Some components always allow multiple
+                "description": f"Auto-discovered {component_name} files"
+            }
+            
+            # Add statistics
+            result.stats[component_name] = {
+                "file_count": len(files),
+                "track_coverage": track_coverage,
+                "has_multiple": has_multiple,
+                "unique_tracks": len(tracks_with_component),
+                "max_files_per_track": max(len(files) for files in tracks_with_component.values()),
+                "min_files_per_track": min(len(files) for files in tracks_with_component.values()),
+                "extensions": list(extensions),
+                "has_sections": has_sections
+            }
+        
+        # Add any missing required components
+        for component_name in ['instrumental']:
+            if component_name not in discovered_components and component_name in files_by_base_pattern:
+                files = files_by_base_pattern[component_name]
+                if len(files) >= total_tracks * 0.05:  # At least 5% coverage
+                    # Add component to schema
+                    discovered_components[component_name] = {
+                        "pattern": "*_instrumental.*",
+                        "multiple": True,  # Always allow multiple
+                        "description": f"Auto-discovered {component_name} files"
+                    }
+                    
+                    # Add statistics
+                    tracks_with_component = defaultdict(list)
+                    for file in files:
+                        track_path = self._get_track_path(file)
+                        tracks_with_component[track_path].append(file)
+                    
+                    result.stats[component_name] = {
+                        "file_count": len(files),
+                        "track_coverage": len(tracks_with_component) / total_tracks,
+                        "has_multiple": True,
+                        "unique_tracks": len(tracks_with_component),
+                        "max_files_per_track": max(len(files) for files in tracks_with_component.values()),
+                        "min_files_per_track": min(len(files) for files in tracks_with_component.values()),
+                        "extensions": list({f.suffix for f in files}),
+                        "has_sections": False
+                    }
+        
+        # Print discovered schema
+        print("\nDiscovered Schema:")
+        print(json.dumps(discovered_components, indent=2))
+        
+        # Update schema with discovered components
+        self.schema["components"] = discovered_components
+        self.save()
+        
+        return result
+
+    def validate_against_data(self, dataset_path: Optional[Path] = None) -> SchemaValidationResult:
+        """Validate that schema correctly describes an existing dataset's structure.
+        
+        Args:
+            dataset_path: Optional alternative dataset path to validate against
+                        (defaults to self.dataset_path)
+        
+        Returns:
+            SchemaValidationResult with validation details
+        """
+        result = SchemaValidationResult()
+        path = dataset_path or self.dataset_path
+        
+        # Track statistics
+        total_files = 0
+        matched_files = 0
+        component_stats = defaultdict(lambda: {"matched": 0, "unmatched": 0})
+        
+        # Find all music files
+        all_files = list(path.rglob("*"))
+        music_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') for part in f.parts)]
+        total_files = len(music_files)
+        
+        # Track which files are matched by components
+        matched_by_component = defaultdict(set)
+        unmatched_files = set(music_files)
+        
+        # Check each component's patterns
+        for component_name, config in self.schema["components"].items():
+            pattern = config["pattern"]
+            required = config.get("required", False)
+            multiple = config.get("multiple", False)
+            
+            # Find all files matching this component
+            matching_files = set()
+            tracks_with_component = defaultdict(list)
+            
+            for file in music_files:
+                if fnmatch.fnmatch(file.name, pattern):
+                    matching_files.add(file)
+                    if file in unmatched_files:
+                        unmatched_files.remove(file)
+                    matched_by_component[component_name].add(file)
+                    
+                    # Group by track for validation
+                    track_path = self._get_track_path(file)
+                    tracks_with_component[track_path].append(file)
+            
+            # Update component statistics
+            component_stats[component_name]["matched"] = len(matching_files)
+            matched_files += len(matching_files)
+            
+            # Validate required components
+            if required and matching_files:  # Only check if we found any files
+                missing_tracks = []
+                for track in self._get_all_track_paths(path):
+                    if track not in tracks_with_component:
+                        missing_tracks.append(track)
+                
+                if missing_tracks:
+                    result.add_error(
+                        f"Required component '{component_name}' missing for tracks: "
+                        f"{', '.join(str(t) for t in missing_tracks[:5])} "
+                        f"{'and more' if len(missing_tracks) > 5 else ''}"
+                    )
+            
+            # Validate multiple files constraint
+            if not multiple:
+                tracks_with_multiple = []
+                for track_path, files in tracks_with_component.items():
+                    if len(files) > 1:
+                        tracks_with_multiple.append(track_path)
+                
+                if tracks_with_multiple:
+                    result.add_error(
+                        f"Component '{component_name}' has multiple files for tracks: "
+                        f"{', '.join(str(t) for t in tracks_with_multiple[:5])} "
+                        f"{'and more' if len(tracks_with_multiple) > 5 else ''}"
+                    )
+        
+        # Check for pattern collisions
+        for comp1 in self.schema["components"]:
+            for comp2 in self.schema["components"]:
+                if comp1 >= comp2:
+                    continue
+                collision = matched_by_component[comp1] & matched_by_component[comp2]
+                if collision:
+                    result.add_error(
+                        f"Pattern collision between '{comp1}' and '{comp2}' for files: "
+                        f"{', '.join(str(f) for f in list(collision)[:5])} "
+                        f"{'and more' if len(collision) > 5 else ''}"
+                    )
+        
+        # Add statistics to result
+        result.stats.update({
+            "total_files": total_files,
+            "matched_files": matched_files,
+            "unmatched_files": len(unmatched_files),
+            "component_coverage": {
+                name: stats for name, stats in component_stats.items()
+            }
+        })
+        
+        # Add warning for unmatched files
+        if unmatched_files:
+            result.add_warning(
+                f"Found {len(unmatched_files)} files not matching any component pattern: "
+                f"{', '.join(str(f) for f in list(unmatched_files)[:5])} "
+                f"{'and more' if len(unmatched_files) > 5 else ''}"
+            )
+        
+        return result
+
+    def _get_track_path(self, file_path: Path) -> str:
+        """Get the canonical track path for a file.
+        
+        Args:
+            file_path: Path to a file
+            
+        Returns:
+            String representation of track path (artist/album/[cd]/track_base)
+        """
+        relative_path = file_path.relative_to(self.dataset_path)
+        parts = list(relative_path.parts)
+        
+        # Get base name without component suffix and number prefix
+        base_name = file_path.stem
+        if '_' in base_name:
+            base_name = base_name.split('_')[0]
+        if '.' in base_name:
+            base_name = base_name.split('.', 1)[1]  # Remove the track number prefix
+        
+        # Handle different directory depths
+        if len(parts) >= 3 and re.match(r"CD\d+", parts[2]):
+            # Has CD directory
+            return f"{parts[0]}/{parts[1]}/{parts[2]}/{base_name}"
+        elif len(parts) >= 2:
+            # Regular artist/album structure
+            return f"{parts[0]}/{parts[1]}/{base_name}"
+        elif len(parts) == 1:
+            # Single album folder
+            return base_name
+        else:
+            # Shouldn't happen, but handle gracefully
+            return base_name
+
+    def _get_all_track_paths(self, path: Path) -> Set[str]:
+        """Get all unique track paths in the dataset.
+        
+        Args:
+            path: Dataset root path
+            
+        Returns:
+            Set of track paths
+        """
+        track_paths = set()
+        for file in path.rglob("*_instrumental.mp3"):
+            track_paths.add(self._get_track_path(file))
+        return track_paths

@@ -7,7 +7,7 @@ from tqdm import tqdm
 from dataclasses import dataclass
 from datetime import datetime
 import fnmatch
-from .schema import DatasetComponentSchema
+from .schema import DatasetComponentSchema, SchemaValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +15,10 @@ logger = logging.getLogger(__name__)
 class SyncState:
     """Track sync state for resumable operations."""
     last_sync: datetime
-    synced_files: Set[str]  # Files successfully downloaded
+    synced_files: Set[str]
     failed_files: Dict[str, str]  # file -> error message
-    total_bytes: int  # Total bytes to download
-    completed_bytes: int  # Bytes downloaded so far
+    total_bytes: int
+    completed_bytes: int
 
     def save(self, path: Path):
         """Save sync state to file."""
@@ -58,7 +58,7 @@ class SyncState:
 
 
 class DatasetSync:
-    """Handles dataset synchronization from remote WebDAV server."""
+    """Handles dataset synchronization with WebDAV server."""
 
     def __init__(self, dataset_path: Path):
         """Initialize sync manager.
@@ -96,53 +96,80 @@ class DatasetSync:
         }
         return Client(options)
 
-    def _update_schema_from_remote(
-        self,
-        client: Client,
-        components: Optional[List[str]] = None
-    ):
-        """Update local schema with component definitions from remote.
+    def _get_remote_schema(self, client: Client) -> dict:
+        """Get schema from remote server.
         
         Args:
             client: WebDAV client
-            components: Optional list of components to update (default: all)
+            
+        Returns:
+            Remote schema dictionary
         """
         try:
             # Download remote schema
             remote_schema_path = ".blackbird/schema.json"
-            local_temp_path = self.dataset_path / ".blackbird" / "remote_schema.json"
+            local_temp = self.dataset_path / ".blackbird" / "remote_schema.json.tmp"
+            client.download_sync(remote_schema_path, str(local_temp))
             
-            client.download_sync(remote_schema_path, str(local_temp_path))
-            
-            with open(local_temp_path) as f:
+            # Load schema
+            with open(local_temp) as f:
                 remote_schema = json.load(f)
-            
-            # Update local schema with remote components
-            remote_components = remote_schema["components"]
-            if components:
-                # Only update specified components
-                for component in components:
-                    if component in remote_components:
-                        self.schema.schema["components"][component] = remote_components[component]
-            else:
-                # Update all components
-                self.schema.schema["components"].update(remote_components)
-            
-            self.schema.save()
-            local_temp_path.unlink()  # Clean up temp file
+                
+            # Clean up temp file
+            local_temp.unlink()
+            return remote_schema
             
         except Exception as e:
-            logger.error(f"Failed to update schema from remote: {str(e)}")
-            raise
+            logger.error(f"Failed to get remote schema: {str(e)}")
+            raise ValueError("Remote schema not available") from e
 
-    def sync_from_remote(
+    def _merge_schema(self, remote_schema: dict) -> SchemaValidationResult:
+        """Merge remote schema components into local schema.
+        
+        Only imports new/updated components from remote schema.
+        Local schema retains its existing component definitions.
+        
+        Args:
+            remote_schema: Remote schema dictionary
+            
+        Returns:
+            Validation result of merged schema
+        """
+        # Validate remote schema version
+        if remote_schema.get("version") != self.schema.schema.get("version"):
+            raise ValueError("Schema version mismatch")
+            
+        # Get new/updated components from remote
+        for name, config in remote_schema["components"].items():
+            if name not in self.schema.schema["components"]:
+                # Add new component
+                result = self.schema.add_component(
+                    name=name,
+                    pattern=config["pattern"],
+                    required=config.get("required", False),
+                    multiple=config.get("multiple", False),
+                    description=config.get("description"),
+                    dry_run=True  # Validate first
+                )
+                if result.is_valid:
+                    self.schema.schema["components"][name] = config
+                else:
+                    logger.warning(f"Skipping invalid component {name}: {result.errors}")
+                    
+        # Save updated schema
+        self.schema.save()
+        
+        # Validate merged schema
+        return self.schema.validate()
+
+    def sync(
         self,
         client: Client,
         components: Optional[List[str]] = None,
         resume: bool = True,
         progress_callback: Optional[Callable[[str], None]] = None
     ) -> SyncState:
-        """Sync dataset from remote server.
+        """Sync dataset with remote server.
         
         Args:
             client: Configured WebDAV client
@@ -153,11 +180,16 @@ class DatasetSync:
         Returns:
             Final sync state
         """
-        # First update schema from remote
+        # First, get and merge remote schema
         if progress_callback:
-            progress_callback("Updating schema from remote...")
-        self._update_schema_from_remote(client, components)
-
+            progress_callback("Getting remote schema...")
+            
+        remote_schema = self._get_remote_schema(client)
+        schema_result = self._merge_schema(remote_schema)
+        
+        if not schema_result.is_valid:
+            raise ValueError(f"Schema validation failed: {schema_result.errors}")
+            
         # Load or create sync state
         state = (
             SyncState.load(self.state_file)
@@ -169,26 +201,21 @@ class DatasetSync:
         if components is None:
             components = self.schema.schema["sync"]["default_components"]
 
-        # Get patterns to sync from updated schema
-        patterns = []
-        missing_components = []
-        for component in components:
-            if component in self.schema.schema["components"]:
-                patterns.append(self.schema.schema["components"][component]["pattern"])
-            else:
-                missing_components.append(component)
-                
-        if missing_components:
-            raise ValueError(
-                f"Components not found in remote schema: {', '.join(missing_components)}. "
-                f"Available components: {', '.join(self.schema.schema['components'].keys())}"
-            )
+        # Validate components exist in schema
+        invalid = set(components) - set(self.schema.schema["components"].keys())
+        if invalid:
+            raise ValueError(f"Invalid components: {invalid}")
 
+        # Get patterns to sync
+        patterns = [
+            self.schema.schema["components"][c]["pattern"]
+            for c in components
+        ]
         exclude_patterns = self.schema.schema["sync"]["exclude_patterns"]
 
-        # Find remote files to sync
+        # Find all files to sync
         if progress_callback:
-            progress_callback("Finding remote files to sync...")
+            progress_callback("Finding files to sync...")
         
         files_to_sync = set()
         for pattern in patterns:
@@ -206,59 +233,47 @@ class DatasetSync:
         if resume:
             files_to_sync = {
                 f for f in files_to_sync
-                if f not in state.synced_files
+                if str(f) not in state.synced_files
             }
 
-        # Calculate total size (if remote server provides this info)
+        # Calculate total size
         if progress_callback:
-            progress_callback("Preparing to download files...")
+            progress_callback("Calculating total size...")
+        
+        total_size = sum(
+            client.info(f)["size"]
+            for f in files_to_sync
+        )
+        state.total_bytes = total_size + state.completed_bytes
 
-        # Download files
+        # Sync files
         if progress_callback:
-            progress_callback(f"Downloading {len(files_to_sync)} files...")
+            progress_callback(f"Syncing {len(files_to_sync)} files...")
 
-        for remote_file in tqdm(
+        for file in tqdm(
             files_to_sync,
-            desc="Downloading files",
+            desc="Syncing files",
             disable=progress_callback is None
         ):
             try:
                 # Create parent directories
-                local_path = self.dataset_path / remote_file
+                local_path = self.dataset_path / file
                 local_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # Download file
                 client.download_sync(
-                    remote_path=remote_file,
+                    remote_path=file,
                     local_path=str(local_path)
                 )
 
                 # Update state
-                state.synced_files.add(remote_file)
-                if local_path.exists():  # Update completed bytes if we can
-                    state.completed_bytes += local_path.stat().st_size
+                state.synced_files.add(file)
+                state.completed_bytes += local_path.stat().st_size
                 state.last_sync = datetime.now()
                 state.save(self.state_file)
 
             except Exception as e:
-                logger.error(f"Failed to sync {remote_file}: {str(e)}")
-                state.failed_files[remote_file] = str(e)
+                logger.error(f"Failed to sync {file}: {str(e)}")
+                state.failed_files[file] = str(e)
 
         return state
-
-    def _update_schema_for_new_file(self, file_path: str):
-        """Update schema if file represents a new component type."""
-        # Try to identify component from filename
-        for suffix in ['_instrumental', '_vocals_noreverb', '_mir']:
-            if suffix in file_path:
-                component_name = suffix.lstrip('_')
-                if component_name not in self.schema.schema["components"]:
-                    # Add new component to schema
-                    pattern = f"*{suffix}.*"
-                    self.schema.add_component(
-                        name=component_name,
-                        pattern=pattern,
-                        required=False,
-                        description=f"Component discovered from remote: {pattern}"
-                    )
-                break

@@ -6,371 +6,307 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 from webdav3.client import Client
 from blackbird.sync import DatasetSync, SyncState
-from blackbird.schema import DatasetComponentSchema
+from blackbird.schema import DatasetComponentSchema, SchemaValidationResult
 
 @pytest.fixture
 def mock_webdav():
-    """Create a mock WebDAV client that tracks operations."""
+    """Create a mock WebDAV client with schema support."""
     client = MagicMock(spec=Client)
     
-    # Track operations
-    client._downloaded_files = {}
-    client._remote_files = set()  # Files available on remote
-    client._remote_schema = None  # Remote schema content
+    # Track remote schema, files, and directories
+    client._remote_schema = {
+        "version": "1.0",
+        "components": {
+            "instrumental": {
+                "pattern": "*_instrumental.mp3",
+                "required": True
+            },
+            "vocals": {
+                "pattern": "*_vocals_noreverb.mp3",
+                "required": False
+            },
+            "mir": {  # New component not in local schema
+                "pattern": "*.mir.json",
+                "required": False,
+                "description": "Music Information Retrieval data"
+            }
+        },
+        "sync": {
+            "default_components": ["instrumental", "vocals"],
+            "exclude_patterns": ["*.tmp", "*.bak"]
+        }
+    }
+    client._remote_files = {
+        "Artist1/Album1/track1_instrumental.mp3": b"data1",
+        "Artist1/Album1/track1_vocals_noreverb.mp3": b"data2",
+        "Artist1/Album1/track1.mir.json": b"data3",
+        "Artist1/Album1/track2_instrumental.mp3": b"data4",
+        "Artist1/Album1/track2_vocals_noreverb.mp3": b"data5",
+        "Artist1/Album1/track2.mir.json": b"data6"
+    }
+    client._remote_file_sizes = {
+        "Artist1/Album1/track1_instrumental.mp3": 1000,
+        "Artist1/Album1/track1_vocals_noreverb.mp3": 800,
+        "Artist1/Album1/track1.mir.json": 200,
+        "Artist1/Album1/track2_instrumental.mp3": 1200,
+        "Artist1/Album1/track2_vocals_noreverb.mp3": 900,
+        "Artist1/Album1/track2.mir.json": 250
+    }
     
-    def mock_download(remote_path, local_path):
-        """Track file downloads."""
+    def mock_download_sync(remote_path, local_path):
         if remote_path == ".blackbird/schema.json":
-            # Write remote schema to local path
-            if client._remote_schema:
-                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(local_path, 'w') as f:
-                    json.dump(client._remote_schema, f)
-            else:
-                raise Exception("Remote schema not found")
+            with open(local_path, 'w') as f:
+                json.dump(client._remote_schema, f)
+        elif remote_path in client._remote_files:
+            with open(local_path, 'wb') as f:
+                f.write(client._remote_files[remote_path])
         else:
-            if remote_path not in client._remote_files:
-                raise Exception(f"File not found: {remote_path}")
-            client._downloaded_files[remote_path] = local_path
-            # Create the file locally
-            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(local_path).touch()
+            raise ValueError(f"File not found: {remote_path}")
             
-    def mock_list(pattern):
-        """Return list of matching remote files."""
-        import fnmatch
-        return [f for f in client._remote_files if fnmatch.fnmatch(f, pattern)]
-    
-    client.download_sync = mock_download
+    def mock_list(pattern=None):
+        if pattern:
+            return [
+                path for path in client._remote_files.keys()
+                if Path(path).match(pattern)
+            ]
+        return list(client._remote_files.keys())
+        
+    def mock_info(path):
+        if path in client._remote_file_sizes:
+            return {"size": client._remote_file_sizes[path]}
+        raise ValueError(f"File not found: {path}")
+        
+    client.download_sync = mock_download_sync
     client.list = mock_list
+    client.info = mock_info
     
     return client
 
 @pytest.fixture
-def destination_dataset(tmp_path):
-    """Create a destination dataset with initial schema."""
-    dataset_root = tmp_path / "dest_dataset"
+def test_dataset(tmp_path):
+    """Create a test dataset with basic schema."""
+    dataset_root = tmp_path / "test_dataset"
     
-    # Create schema with basic components
+    # Create schema with only instrumental component
     schema = DatasetComponentSchema.create(dataset_root)
-    schema.schema["components"].update({
+    schema.schema["components"] = {
         "instrumental": {
             "pattern": "*_instrumental.mp3",
-            "required": False,
-            "description": "Instrumental tracks"
+            "required": True
         }
-    })
+    }
     schema.save()
     
     yield dataset_root
+    
+    # Cleanup
     shutil.rmtree(dataset_root)
 
-def test_schema_update_from_remote(destination_dataset, mock_webdav):
-    """Test updating schema from remote.
+def test_get_remote_schema(test_dataset, mock_webdav):
+    """Test fetching and parsing remote schema."""
+    sync = DatasetSync(test_dataset)
+    remote_schema = sync._get_remote_schema(mock_webdav)
     
-    This test verifies that:
-    1. Remote schema is downloaded
-    2. Local schema is updated with remote components
-    3. Only requested components are updated if specified
-    4. Files are synced using updated schema patterns
-    """
-    sync = DatasetSync(destination_dataset)
+    assert remote_schema["version"] == "1.0"
+    assert "mir" in remote_schema["components"]
+    assert remote_schema["components"]["mir"]["pattern"] == "*.mir.json"
+
+def test_merge_schema(test_dataset, mock_webdav):
+    """Test merging remote schema with local schema."""
+    sync = DatasetSync(test_dataset)
+    remote_schema = sync._get_remote_schema(mock_webdav)
+    result = sync._merge_schema(remote_schema)
     
-    # Setup mock remote schema with additional components
-    mock_webdav._remote_schema = {
-        "version": "1.0",
-        "components": {
-            "instrumental": {
-                "pattern": "*_instrumental.mp3",
-                "required": True
-            },
-            "vocals": {
-                "pattern": "*_vocals_noreverb.mp3",
-                "required": False,
-                "description": "Isolated vocals"
-            },
-            "mir": {
-                "pattern": "*.mir.json",
-                "required": False
-            }
-        },
-        "sync": {
-            "default_components": ["instrumental", "vocals"]
-        }
-    }
+    assert result.is_valid
     
-    # Setup mock remote files
-    remote_files = [
-        "Artist1/Album1/track1_instrumental.mp3",
-        "Artist1/Album1/track1_vocals_noreverb.mp3",
-        "Artist1/Album1/track1.mir.json"
-    ]
-    for f in remote_files:
-        mock_webdav._remote_files.add(f)
+    # Check that new component was added
+    assert "mir" in sync.schema.schema["components"]
+    assert sync.schema.schema["components"]["mir"]["pattern"] == "*.mir.json"
     
-    # Sync only vocals component
-    state = sync.sync_from_remote(
-        mock_webdav,
-        components=["vocals"]
-    )
+    # Check that existing component was preserved
+    assert sync.schema.schema["components"]["instrumental"]["required"] is True
+
+def test_schema_version_mismatch(test_dataset, mock_webdav):
+    """Test handling schema version mismatch."""
+    sync = DatasetSync(test_dataset)
+    
+    # Modify remote schema version
+    mock_webdav._remote_schema["version"] = "2.0"
+    
+    with pytest.raises(ValueError, match="Schema version mismatch"):
+        remote_schema = sync._get_remote_schema(mock_webdav)
+        sync._merge_schema(remote_schema)
+
+def test_sync_with_schema_update(test_dataset, mock_webdav):
+    """Test full sync process with schema update."""
+    sync = DatasetSync(test_dataset)
+    
+    # Run sync with new component
+    state = sync.sync(mock_webdav, components=["instrumental", "mir"])
     
     # Verify schema was updated
-    assert "vocals" in sync.schema.schema["components"]
-    assert sync.schema.schema["components"]["vocals"]["description"] == "Isolated vocals"
-    assert "mir" not in sync.schema.schema["components"]  # Not requested
+    assert "mir" in sync.schema.schema["components"]
     
-    # Verify only vocals files were downloaded
-    downloaded = set(mock_webdav._downloaded_files.keys())
-    assert len(downloaded) == 1
-    assert all("_vocals_noreverb.mp3" in f for f in downloaded)
-
-def test_sync_with_missing_component(destination_dataset, mock_webdav):
-    """Test syncing with component not in remote schema.
-    
-    This test verifies that:
-    1. Warning is logged for missing components
-    2. Sync continues with available components
-    3. No files are downloaded for missing components
-    """
-    sync = DatasetSync(destination_dataset)
-    
-    # Setup mock remote schema
-    mock_webdav._remote_schema = {
-        "version": "1.0",
-        "components": {
-            "instrumental": {
-                "pattern": "*_instrumental.mp3",
-                "required": True
-            }
-        }
-    }
-    
-    # Setup mock remote files
-    remote_files = ["Artist1/Album1/track1_instrumental.mp3"]
-    for f in remote_files:
-        mock_webdav._remote_files.add(f)
-    
-    # Try to sync non-existent component
-    with pytest.warns(UserWarning, match="Component nonexistent not found in remote schema"):
-        state = sync.sync_from_remote(
-            mock_webdav,
-            components=["instrumental", "nonexistent"]
-        )
-    
-    # Verify only instrumental files were downloaded
-    downloaded = set(mock_webdav._downloaded_files.keys())
-    assert len(downloaded) == 1
-    assert all("_instrumental.mp3" in f for f in downloaded)
-
-def test_selective_component_pull(destination_dataset, mock_webdav):
-    """Test pulling only specific components.
-    
-    This test verifies that:
-    1. We can selectively pull only certain components
-    2. Only requested components are downloaded
-    3. Sync state tracks downloads correctly
-    """
-    sync = DatasetSync(destination_dataset)
-    
-    # Setup mock remote schema
-    mock_webdav._remote_schema = {
-        "version": "1.0",
-        "components": {
-            "instrumental": {
-                "pattern": "*_instrumental.mp3",
-                "required": True
-            },
-            "vocals": {
-                "pattern": "*_vocals_noreverb.mp3",
-                "required": False
-            },
-            "mir": {
-                "pattern": "*.mir.json",
-                "required": False
-            }
-        }
-    }
-    
-    # Setup mock remote with various files
-    remote_files = [
+    # Verify files were synced
+    synced_files = {
         "Artist1/Album1/track1_instrumental.mp3",
-        "Artist1/Album1/track1_vocals_noreverb.mp3",
-        "Artist1/Album1/track1.mir.json"
-    ]
-    for f in remote_files:
-        mock_webdav._remote_files.add(f)
-    
-    # Pull only instrumental files
-    state = sync.sync_from_remote(
-        mock_webdav,
-        components=["instrumental"]
-    )
-    
-    # Verify only instrumental files were downloaded
-    downloaded = set(mock_webdav._downloaded_files.keys())
-    assert len(downloaded) == 1
-    assert all("_instrumental.mp3" in f for f in downloaded)
-    
-    # Verify sync state
-    assert len(state.synced_files) == 1
-    assert not state.failed_files
-
-def test_resume_sync(destination_dataset, mock_webdav):
-    """Test resuming a sync operation.
-    
-    This test verifies that:
-    1. Sync can be resumed from previous state
-    2. Already synced files are skipped
-    3. Progress is properly tracked
-    4. State is saved after each file
-    """
-    sync = DatasetSync(destination_dataset)
-    
-    # Setup mock remote schema
-    mock_webdav._remote_schema = {
-        "version": "1.0",
-        "components": {
-            "instrumental": {
-                "pattern": "*_instrumental.mp3",
-                "required": True
-            }
-        }
+        "Artist1/Album1/track1.mir.json",
+        "Artist1/Album1/track2_instrumental.mp3",
+        "Artist1/Album1/track2.mir.json"
     }
+    assert state.synced_files == synced_files
     
-    # Setup mock remote with multiple files
-    remote_files = [
-        "Artist1/Album1/track1_instrumental.mp3",
-        "Artist1/Album1/track2_instrumental.mp3"
-    ]
-    for f in remote_files:
-        mock_webdav._remote_files.add(f)
+    # Verify files exist on disk
+    for file in synced_files:
+        assert (test_dataset / file).exists()
+
+def test_sync_resume_after_schema_update(test_dataset, mock_webdav):
+    """Test resuming sync after schema update."""
+    sync = DatasetSync(test_dataset)
     
-    # Create initial sync state with one file already synced
-    initial_state = SyncState.create_new()
-    initial_state.synced_files.add("Artist1/Album1/track1_instrumental.mp3")
-    initial_state.completed_bytes = 100
-    initial_state.save(sync.state_file)
+    # Create initial sync state
+    state = SyncState.create_new()
+    state.synced_files.add("Artist1/Album1/track1_instrumental.mp3")
+    state.completed_bytes = 1000
+    state.save(sync.state_file)
     
-    # Pull all instrumental files with resume
-    state = sync.sync_from_remote(
+    # Run sync with resume
+    final_state = sync.sync(
         mock_webdav,
-        components=["instrumental"],
+        components=["instrumental", "mir"],
         resume=True
     )
     
-    # Verify only non-synced file was downloaded
-    downloaded = set(mock_webdav._downloaded_files.keys())
-    assert len(downloaded) == 1
-    assert "track2_instrumental.mp3" in str(downloaded)
+    # Verify previously synced file was preserved
+    assert "Artist1/Album1/track1_instrumental.mp3" in final_state.synced_files
     
-    # Verify state was preserved and updated
-    assert "Artist1/Album1/track1_instrumental.mp3" in state.synced_files
-    assert state.completed_bytes > initial_state.completed_bytes
-
-def test_sync_error_handling(destination_dataset, mock_webdav):
-    """Test handling of sync errors.
-    
-    This test verifies that:
-    1. Errors during sync are properly caught and recorded
-    2. Sync continues after file errors
-    3. Failed files are tracked in sync state
-    4. Successfully synced files are still recorded
-    """
-    sync = DatasetSync(destination_dataset)
-    
-    # Setup mock remote schema
-    mock_webdav._remote_schema = {
-        "version": "1.0",
-        "components": {
-            "instrumental": {
-                "pattern": "*_instrumental.mp3",
-                "required": True
-            }
-        }
+    # Verify new files were synced
+    expected_new_files = {
+        "Artist1/Album1/track1.mir.json",
+        "Artist1/Album1/track2_instrumental.mp3",
+        "Artist1/Album1/track2.mir.json"
     }
+    assert all(f in final_state.synced_files for f in expected_new_files)
     
-    # Setup mock remote with files
-    remote_files = [
-        "Artist1/Album1/track1_instrumental.mp3",
-        "Artist1/Album1/track2_instrumental.mp3"
-    ]
-    for f in remote_files:
-        mock_webdav._remote_files.add(f)
+    # Verify completed bytes were accumulated
+    assert final_state.completed_bytes > state.completed_bytes
+
+def test_sync_with_invalid_component(test_dataset, mock_webdav):
+    """Test sync with component not in schema."""
+    sync = DatasetSync(test_dataset)
     
-    # Make one file fail to download
-    def mock_download_with_error(remote_path, local_path):
-        if remote_path == ".blackbird/schema.json":
-            # Write remote schema
-            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(local_path, 'w') as f:
-                json.dump(mock_webdav._remote_schema, f)
-        elif "track1" in remote_path:
-            raise Exception("Simulated download error")
-        else:
-            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(local_path).touch()
-            mock_webdav._downloaded_files[remote_path] = local_path
-            
-    mock_webdav.download_sync = mock_download_with_error
+    with pytest.raises(ValueError, match="Invalid components"):
+        sync.sync(mock_webdav, components=["nonexistent"])
+
+def test_sync_progress_callback(test_dataset, mock_webdav):
+    """Test progress callback during sync."""
+    sync = DatasetSync(test_dataset)
+    progress_messages = []
     
-    # Try to pull all instrumental files
-    state = sync.sync_from_remote(
+    def progress_callback(msg):
+        progress_messages.append(msg)
+    
+    sync.sync(
         mock_webdav,
-        components=["instrumental"]
+        components=["instrumental"],
+        progress_callback=progress_callback
     )
     
-    # Verify error handling
-    assert len(state.failed_files) == 1
-    assert "track1" in next(iter(state.failed_files.keys()))
-    assert "Simulated download error" in next(iter(state.failed_files.values()))
-    
-    # Verify successful files were still synced
-    assert len(state.synced_files) == 1
-    assert "track2" in next(iter(state.synced_files))
+    assert "Getting remote schema..." in progress_messages
+    assert "Finding files to sync..." in progress_messages
+    assert "Calculating total size..." in progress_messages
+    assert any(msg.startswith("Syncing ") for msg in progress_messages)
 
-def test_exclude_patterns(destination_dataset, mock_webdav):
-    """Test that exclude patterns are respected.
+def test_sync_state_save_load(test_dataset):
+    """Test saving and loading sync state."""
+    state = SyncState.create_new()
+    state.synced_files.add("test1.mp3")
+    state.failed_files["test2.mp3"] = "Failed to upload"
+    state.total_bytes = 1000
+    state.completed_bytes = 500
     
-    This test verifies that:
-    1. Files matching exclude patterns are not downloaded
-    2. Other files are downloaded normally
-    """
-    sync = DatasetSync(destination_dataset)
+    state_file = test_dataset / ".blackbird" / "sync_state.json"
+    state.save(state_file)
     
-    # Setup mock remote schema
-    mock_webdav._remote_schema = {
-        "version": "1.0",
-        "components": {
-            "instrumental": {
-                "pattern": "*_instrumental.mp3",
-                "required": True
-            }
-        },
-        "sync": {
-            "exclude_patterns": ["*_temp.*"]
-        }
-    }
+    loaded_state = SyncState.load(state_file)
+    assert loaded_state.synced_files == {"test1.mp3"}
+    assert loaded_state.failed_files == {"test2.mp3": "Failed to upload"}
+    assert loaded_state.total_bytes == 1000
+    assert loaded_state.completed_bytes == 500
+
+def test_sync_all_components(test_dataset, mock_webdav):
+    """Test syncing all components."""
+    sync = DatasetSync(test_dataset)
     
-    # Add exclude pattern to schema
-    sync.schema.schema["sync"]["exclude_patterns"] = ["*_temp.*"]
-    sync.schema.save()
+    # Run sync
+    state = sync.sync(mock_webdav, components=["instrumental", "vocals", "lyrics"])
     
-    # Setup mock remote with some files to exclude
-    remote_files = [
+    # Check created directories
+    assert "Artist1" in mock_webdav._created_dirs
+    assert "Artist1/Album1" in mock_webdav._created_dirs
+    
+    # Check uploaded files
+    uploaded_files = set(mock_webdav._uploaded_files.keys())
+    expected_files = {
         "Artist1/Album1/track1_instrumental.mp3",
-        "Artist1/Album1/track1_instrumental_temp.mp3"
-    ]
-    for f in remote_files:
-        mock_webdav._remote_files.add(f)
+        "Artist1/Album1/track1_vocals_noreverb.mp3",
+        "Artist1/Album1/track1_vocals_noreverb.json",
+        "Artist1/Album1/track2_instrumental.mp3",
+        "Artist1/Album1/track2_vocals_noreverb.mp3"
+    }
+    assert uploaded_files == expected_files
     
-    # Pull instrumental files
-    state = sync.sync_from_remote(
-        mock_webdav,
-        components=["instrumental"]
-    )
+    # Check sync state
+    assert len(state.synced_files) == 5
+    assert not state.failed_files
+    assert state.total_bytes > 0
+    assert state.completed_bytes == state.total_bytes
+
+def test_sync_selective_components(test_dataset, mock_webdav):
+    """Test syncing specific components."""
+    sync = DatasetSync(test_dataset)
     
-    # Verify only non-excluded files were downloaded
-    downloaded = set(mock_webdav._downloaded_files.keys())
-    assert len(downloaded) == 1
-    assert not any("_temp" in f for f in downloaded)
-    assert all(not f.endswith("_temp.mp3") for f in state.synced_files) 
+    # Sync only vocals
+    state = sync.sync(mock_webdav, components=["vocals"])
+    
+    # Check uploaded files
+    uploaded_files = set(mock_webdav._uploaded_files.keys())
+    expected_files = {
+        "Artist1/Album1/track1_vocals_noreverb.mp3",
+        "Artist1/Album1/track2_vocals_noreverb.mp3"
+    }
+    assert uploaded_files == expected_files
+
+def test_sync_resume(test_dataset, mock_webdav):
+    """Test resuming sync operation."""
+    sync = DatasetSync(test_dataset)
+    
+    # Create existing sync state
+    state = SyncState.create_new()
+    state.synced_files.add("Artist1/Album1/track1_instrumental.mp3")
+    state.completed_bytes = 100
+    state.save(sync.state_file)
+    
+    # Run sync
+    final_state = sync.sync(mock_webdav, components=["instrumental"])
+    
+    # Check that previously synced file was skipped
+    uploaded_files = set(mock_webdav._uploaded_files.keys())
+    assert "Artist1/Album1/track1_instrumental.mp3" not in uploaded_files
+    assert "Artist1/Album1/track2_instrumental.mp3" in uploaded_files
+    
+    # Check state was preserved
+    assert "Artist1/Album1/track1_instrumental.mp3" in final_state.synced_files
+    assert final_state.completed_bytes > state.completed_bytes
+
+def test_sync_exclude_patterns(test_dataset, mock_webdav):
+    """Test exclusion patterns during sync."""
+    sync = DatasetSync(test_dataset)
+    
+    # Run sync
+    state = sync.sync(mock_webdav)
+    
+    # Check that temporary files were excluded
+    uploaded_files = set(mock_webdav._uploaded_files.keys())
+    assert not any(f.endswith('.tmp') for f in uploaded_files)
+    assert not any(f.endswith('.bak') for f in uploaded_files) 

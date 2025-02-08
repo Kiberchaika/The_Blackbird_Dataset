@@ -8,20 +8,19 @@ Blackbird Dataset Manager is a Python package designed to manage and synchronize
 
 ### 1. Dataset Structure
 
-The dataset follows a hierarchical structure:
+The dataset follows a fixed hierarchical structure that is consistent across all installations:
 ```
 dataset_root/
 ├── .blackbird/
-│   ├── schema.json
-│   └── sync_state.json
+│   ├── schema.json      # Component definitions only
+│   └── sync_state.json  # Sync progress tracking
 ├── Artist1/
 │   ├── Album1/
 │   │   ├── track1_instrumental.mp3
 │   │   ├── track1_vocals_noreverb.mp3
-│   │   ├── track1.mir.json
-│   │   └── track1_vocals_stretched_120bpm_section1.mp3
+│   │   └── ...
 │   └── Album2/
-│       ├── CD1/
+│       ├── CD1/        # Optional CD-level for multi-CD albums
 │       │   ├── track1_instrumental.mp3
 │       │   └── ...
 │       └── CD2/
@@ -30,45 +29,138 @@ dataset_root/
 └── ...
 ```
 
-Key features:
-- Artist/Album organization
-- Optional CD subdirectories for multi-CD albums
-- Component files follow consistent naming patterns
-- Hidden `.blackbird` directory for metadata
+The directory structure is fixed and non-configurable:
+1. Artist level (required)
+2. Album level (required)
+3. CD level (optional, must match pattern "CD\\d+")
+4. Track files with component-specific suffixes
 
 ### 2. Schema Management
 
-The schema system is the core of Blackbird's functionality. It defines:
-1. What components exist in the dataset
-2. How to identify files belonging to each component
-3. Which components are required vs optional
-4. Rules for directory structure
+The schema system defines ONLY the types of files (components) that can exist for each track. It does NOT define the directory structure, which is fixed. The schema specifies:
+1. What component types exist (e.g., instrumentals, vocals, MIR data)
+2. The naming pattern for each component type (including file extensions)
+3. Whether components are required or optional
+4. Whether multiple files of a component are allowed per track
+5. Human-readable descriptions of each component's purpose
 
-Example schema (`schema.json`):
+#### Schema Discovery
+
+The schema discovery process automatically analyzes the dataset structure to generate a schema that matches the existing files. This is done through the `discover_schema` method which:
+
+1. **Component Detection**
+   - Analyzes file patterns and suffixes to identify distinct components
+   - Groups files by their base patterns (e.g., `_instrumental.mp3`, `_vocals_noreverb.json`)
+   - Detects special cases like MIR files and section-based components
+   - Preserves full file extensions in patterns (e.g., `.mp3`, `.mir.json`)
+
+2. **Pattern Analysis**
+   - Determines glob patterns that uniquely identify each component
+   - Handles variations in file extensions and naming conventions
+   - Supports both simple patterns (e.g., `*_instrumental.mp3`) and complex ones (e.g., `*_vocals_stretched_*section*.mp3`)
+   - File extensions are considered part of the pattern and must match exactly
+
+3. **Component Properties**
+   - Determines if components allow multiple files per track
+   - Calculates track coverage for each component
+   - Identifies section-based components (e.g., stretched vocals with multiple sections)
+   - Assigns meaningful descriptions to each component
+
+4. **Statistics Generation**
+   For each discovered component, tracks:
+   - Total file count
+   - Track coverage percentage
+   - Number of unique tracks
+   - Files per track (min/max)
+   - File extensions
+   - Section presence
+
+Example discovery usage:
+```python
+# Using the utility script
+./utils/discover_and_save_schema.py /path/to/dataset --num-artists 25
+
+# Or programmatically
+schema = DatasetComponentSchema(dataset_path)
+result = schema.discover_schema(folders=["Artist/Album"])  # Optional folder filter
+
+# Access discovered components
+for name, config in schema.schema["components"].items():
+    print(f"Component: {name}")
+    print(f"Pattern: {config['pattern']}")  # Includes exact file extension
+    print(f"Multiple files allowed: {config['multiple']}")
+    print(f"Description: {config['description']}")
+    
+    # Access statistics
+    stats = result.stats[name]
+    print(f"Files found: {stats['file_count']}")
+    print(f"Track coverage: {stats['track_coverage']*100:.1f}%")
+```
+
+#### Schema Design Rationale
+
+1. **Component-Only Focus**
+   - Schema ONLY defines file types and their patterns
+   - Does NOT affect the fixed artist/album/[cd]/track structure
+   - Allows different machines to work with different subsets of components
+
+2. **Component Definitions**
+   - `pattern`: Glob pattern for identifying component files (includes exact file extension)
+   - `required`: Whether this component must exist for all tracks
+   - `multiple`: Whether multiple files of this type are allowed per track
+   - `description`: Human-readable description of the component's purpose
+
+3. **File Extension Handling**
+   - File extensions are treated as part of the component pattern
+   - Extensions must match exactly (e.g., `.mp3` won't match `.MP3`)
+   - Compound extensions are preserved (e.g., `.mir.json`, `.stretched.mp3`)
+   - Extensions are used to determine component types (e.g., `_audio` suffix for `.mp3` files)
+
+4. **Component Naming**
+   - Component names are derived from file patterns
+   - Special handling for audio files (adds `_audio` suffix)
+   - Special handling for JSON files with lyrics (adds `_lyrics` suffix)
+   - Section components get `_section` suffix
+
+Example schema.json:
 ```json
 {
   "version": "1.0",
   "components": {
-    "instrumental": {
-      "pattern": "*_instrumental.mp3",
-      "required": true,
-      "description": "Instrumental tracks"
-    },
-    "vocals": {
-      "pattern": "*_vocals_noreverb.mp3",
-      "required": false,
-      "description": "Isolated vocals without reverb"
+    "vocals_audio": {
+      "pattern": "*_vocals.mp3",
+      "multiple": false,
+      "description": "Acapella files"
     },
     "mir": {
       "pattern": "*.mir.json",
-      "required": false,
-      "description": "Music Information Retrieval analysis"
+      "multiple": false,
+      "description": "Music Information Retrieval files"
     },
-    "sections": {
-      "pattern": "*_vocals_stretched_120bpm_section*.mp3",
-      "required": false,
+    "vocals_noreverb_lyrics": {
+      "pattern": "*_vocals_noreverb.json",
+      "multiple": false,
+      "description": "Lyrics from Whisper"
+    },
+    "instrumental_audio": {
+      "pattern": "*_instrumental.mp3",
+      "multiple": false,
+      "description": "Instrumental file with vocals removed"
+    },
+    "vocals_stretched_audio": {
+      "pattern": "*_vocals_stretched.mp3",
       "multiple": true,
-      "description": "Cut sections of vocals stretched to 120 BPM"
+      "description": "Vocals file stretched to 120bpm"
+    },
+    "vocals_stretched_lyrics_section": {
+      "pattern": "*_vocals_stretched_lyrics_*section*.json",
+      "multiple": true,
+      "description": "A lyrics corresponding to the section of the vocals"
+    },
+    "caption": {
+      "pattern": "*_caption.txt",
+      "multiple": false,
+      "description": "Caption from a human captioner describing voice"
     }
   },
   "structure": {
@@ -79,28 +171,48 @@ Example schema (`schema.json`):
     }
   },
   "sync": {
-    "default_components": ["instrumental", "vocals"],
+    "default_components": ["instrumental_audio"],
     "exclude_patterns": ["*.tmp", "*.bak"]
   }
 }
 ```
 
-#### Schema Design Rationale
+#### Schema Validation
 
-1. **Component Definitions**
-   - `pattern`: Uses glob patterns for flexible file matching
-   - `required`: Distinguishes core components from optional ones
-   - `multiple`: Allows components that can have multiple files per track (e.g., sections)
-   - `description`: Documents component purpose
+The schema validation process ensures:
 
-2. **Directory Structure Rules**
-   - Explicit level definitions ensure consistent organization
-   - CD pattern validation maintains uniformity across multi-CD albums
-   - Optional CD level accommodates both single and multi-CD albums
+1. **Pattern Uniqueness**
+   - Each component pattern must uniquely identify its files
+   - No pattern collisions between components
+   - File extensions are part of uniqueness check
 
-3. **Sync Configuration**
-   - Default components list for common sync operations
-   - Exclude patterns prevent syncing temporary/backup files
+2. **Required Components**
+   - All required components must be present for each track
+   - Missing required components trigger validation errors
+
+3. **Multiple Files Constraint**
+   - Components with `multiple: false` must have exactly one file per track
+   - Section-based components automatically get `multiple: true`
+
+4. **Directory Structure**
+   - Validates against fixed artist/album/[cd]/track structure
+   - Ensures CD directories match pattern when present
+   - Verifies maximum directory depth
+
+Example validation:
+```python
+schema = DatasetComponentSchema(dataset_path)
+result = schema.validate()
+
+if result.is_valid:
+    print("Schema validation successful")
+    print(f"Total files: {result.stats['total_files']}")
+    print(f"Matched files: {result.stats['matched_files']}")
+else:
+    print("Validation errors:")
+    for error in result.errors:
+        print(f"- {error}")
+```
 
 ### 3. Synchronization
 
@@ -112,11 +224,56 @@ Blackbird uses WebDAV for dataset synchronization, with several key features:
 - Each machine maintains its own subset of components
 
 #### 3.2 Schema-First Sync
-1. First pulls and updates schema from remote
-2. Uses remote schema to identify files to sync
-3. Fails fast if requested components don't exist in remote
-   - Rationale: Prevents partial/incomplete syncs
-   - Better to fail early than have inconsistent state
+
+The sync process begins with schema handling:
+
+1. **Remote Schema Reading**
+   ```python
+   # First, read remote schema to understand available components
+   remote_schema = client.read_file(".blackbird/schema.json")
+   ```
+
+2. **Selective Schema Update**
+   - Only import new/updated components from remote schema
+   - Local schema retains its existing component definitions
+   - Remote schema used for:
+     a. File pattern discovery
+     b. Component type descriptions
+     c. Validation of requested components
+
+Example schema merge:
+```python
+# Local schema has instrumental and vocals
+local_schema = {
+    "components": {
+        "instrumental": {"pattern": "*_instrumental.mp3"},
+        "vocals": {"pattern": "*_vocals_noreverb.mp3"}
+    }
+}
+
+# Remote schema has instrumental, vocals, and mir
+remote_schema = {
+    "components": {
+        "instrumental": {"pattern": "*_instrumental.mp3"},
+        "vocals": {"pattern": "*_vocals_noreverb.mp3"},
+        "mir": {"pattern": "*.mir.json"}
+    }
+}
+
+# After merge, local schema adds mir component
+merged_schema = {
+    "components": {
+        "instrumental": {"pattern": "*_instrumental.mp3"},
+        "vocals": {"pattern": "*_vocals_noreverb.mp3"},
+        "mir": {"pattern": "*.mir.json"}  # New component added
+    }
+}
+```
+
+3. **Component Validation**
+   - Verify requested components exist in remote schema
+   - Use remote patterns to locate files
+   - Fail fast if components not found
 
 #### 3.3 Selective Component Sync
 ```python
@@ -601,3 +758,175 @@ Test coverage needed:
 3. Server configuration validation
 4. Connection testing
 5. Security testing 
+
+## Dataset Indexing
+
+Blackbird maintains a lightweight, fast index of the dataset for efficient operations. The index is stored in `.blackbird/index.pickle` using Python's pickle format with protocol 5 for optimal performance.
+
+### Index Structure
+
+```python
+@dataclass
+class TrackInfo:
+    """Track information in the index."""
+    track_path: str      # Relative path identifying the track
+    artist: str
+    album: str
+    cd_number: str       # None for non-CD tracks
+    base_name: str       # Track name without component suffixes
+    components: Dict[str, str]  # Component type -> file path
+
+@dataclass
+class DatasetIndex:
+    """Main index structure."""
+    tracks: Dict[str, TrackInfo]  # track_path -> TrackInfo
+    artists: Set[str]
+    albums: Dict[str, Set[str]]   # artist -> set of albums
+    
+    def save(self, path: Path):
+        """Save index to pickle file."""
+        with open(path, 'wb') as f:
+            pickle.dump(self, f, protocol=5)
+    
+    @classmethod
+    def load(cls, path: Path) -> 'DatasetIndex':
+        """Load index from pickle file."""
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+```
+
+### Dataset Statistics
+
+The indexer also maintains dataset statistics in `.blackbird/stats.json`:
+
+```json
+{
+    "last_updated": "2024-03-14T12:00:00Z",
+    "total_size_bytes": 1234567890,
+    "file_count": {
+        "total": 1000,
+        "by_component": {
+            "instrumental": 500,
+            "vocals": 300,
+            "mir": 200
+        }
+    },
+    "track_count": {
+        "total": 500,
+        "by_artist": {
+            "Artist1": 200,
+            "Artist2": 300
+        }
+    },
+    "artist_count": 2,
+    "album_count": 10
+}
+```
+
+These statistics are used to:
+1. Display dataset information
+2. Calculate sync progress when pulling from remote
+3. Provide accurate progress during operations
+
+### Index Operations
+
+#### 1. Building/Rebuilding Index
+
+From code:
+```python
+# Index is built automatically when needed
+dataset = Dataset("/path/to/dataset", build_index=True)
+
+# Or manually rebuild
+dataset.rebuild_index()  # Shows progress bar by default
+```
+
+From CLI:
+```bash
+blackbird index rebuild /path/to/dataset
+```
+
+Progress tracking:
+1. Use filesystem block counting for fast work estimation
+2. Track progress based on processed data size
+3. Display progress bar using tqdm
+4. Update both index and statistics files
+
+#### 2. Incremental Updates
+
+```python
+# After sync completion
+dataset.update_index()  # Updates both index and stats
+```
+
+#### 3. Using Index for Operations
+
+```python
+# Find tracks using index (enabled by default)
+tracks = dataset.find_tracks(
+    artist="Artist1",
+    components=["vocals"]
+)
+
+# Text-based search
+results = dataset.search("keyword")
+```
+
+### Index Performance
+
+1. **Build Time vs Search Time**
+   - Initial build: O(n) where n is total file count
+   - Search operations: O(1) using dictionary lookups
+   - Text search: O(n) but on small metadata only
+
+2. **Memory Usage**
+   - Minimal memory footprint
+   - Only stores file paths and metadata
+   - No file contents or large data structures
+
+3. **Disk Space**
+   - Extremely lightweight (typically under 50MB)
+   - Only stores file paths and basic metadata
+   - No duplicate data or binary content
+
+### Test Coverage
+
+```python
+def test_index_build(test_dataset):
+    """Test index building and verification."""
+    dataset = Dataset(test_dataset, build_index=True)
+    
+    # Verify index contents
+    assert len(dataset.index.tracks) == 4
+    assert len(dataset.index.artists) == 2
+    
+    # Verify stats file
+    with open(dataset.path / ".blackbird" / "stats.json") as f:
+        stats = json.load(f)
+        assert stats["track_count"]["total"] == 4
+        assert stats["artist_count"] == 2
+    
+def test_index_search(test_dataset):
+    """Test index-based search operations."""
+    dataset = Dataset(test_dataset, build_index=True)
+    
+    # Search by component
+    tracks = dataset.find_tracks(components=["vocals"])
+    assert len(tracks) == 2
+    
+    # Search by text
+    results = dataset.search("Artist1")
+    assert len(results) == 2
+    
+def test_index_update(test_dataset):
+    """Test incremental index updates."""
+    dataset = Dataset(test_dataset, build_index=True)
+    
+    # Add new file
+    new_file = test_dataset / "Artist1/Album1/new_track.mp3"
+    new_file.touch()
+    
+    # Update should catch new file
+    dataset.update_index()
+    assert dataset.index.tracks[new_file.name] is not None
+``` 

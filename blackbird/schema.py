@@ -38,7 +38,7 @@ class DatasetComponentSchema:
     DEFAULT_SCHEMA = {
         "version": "1.0",
         "components": {
-            "instrumental": {
+            "instrumental_audio": {
                 "pattern": "*_instrumental.mp3",
                 "required": True
             }
@@ -51,7 +51,6 @@ class DatasetComponentSchema:
             }
         },
         "sync": {
-            "default_components": ["instrumental"],
             "exclude_patterns": ["*.tmp", "*.bak"]
         }
     }
@@ -107,7 +106,8 @@ class DatasetComponentSchema:
         required: bool = False,
         multiple: bool = False,
         description: Optional[str] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        skip_file_validation: bool = False
     ) -> SchemaValidationResult:
         """Add a new component to schema with validation.
         
@@ -118,6 +118,7 @@ class DatasetComponentSchema:
             multiple: Whether multiple files per track are allowed
             description: Optional description
             dry_run: If True, only validate but don't save
+            skip_file_validation: If True, skip validating file existence
             
         Returns:
             Validation result with statistics
@@ -132,24 +133,30 @@ class DatasetComponentSchema:
         if name in self.schema["components"]:
             result.add_error(f"Component {name} already exists")
             
-        # Test pattern against dataset
-        found_files = list(self.dataset_path.rglob(pattern))
-        if not found_files:
-            result.add_warning(f"Pattern {pattern} matches no files")
-        
-        result.stats["matched_files"] = len(found_files)
-        
-        # Group by track to check multiple/single file constraints
-        tracks_files = self._group_by_track(found_files)
-        if not multiple:
-            multiple_files = [track for track, files in tracks_files.items() if len(files) > 1]
-            if multiple_files:
-                result.add_error(
-                    f"Multiple files found for {len(multiple_files)} tracks "
-                    f"but multiple=False (example: {multiple_files[0]})"
-                )
-        
-        result.stats["matched_tracks"] = len(tracks_files)
+        if not skip_file_validation:
+            # Test pattern against dataset
+            found_files = list(self.dataset_path.rglob(pattern))
+            if not found_files:
+                result.add_warning(f"Pattern {pattern} matches no files")
+            
+            result.stats["matched_files"] = len(found_files)
+            
+            # Group by track to check multiple/single file constraints
+            tracks_files = self._group_by_track(found_files)
+            if not multiple:
+                multiple_files = [track for track, files in tracks_files.items() if len(files) > 1]
+                if multiple_files:
+                    result.add_error(
+                        f"Multiple files found for {len(multiple_files)} tracks "
+                        f"but multiple=False (example: {multiple_files[0]})"
+                    )
+            
+            result.stats["matched_tracks"] = len(tracks_files)
+        else:
+            # Skip file validation
+            result.stats["matched_files"] = 0
+            result.stats["matched_tracks"] = 0
+            result.stats["validation_skipped"] = True
         
         # If validation passed and not dry run, add to schema
         if result.is_valid and not dry_run:
@@ -197,8 +204,12 @@ class DatasetComponentSchema:
             
         return result
 
-    def validate(self) -> SchemaValidationResult:
+    def validate(self, skip_file_validation: bool = False) -> SchemaValidationResult:
         """Validate entire schema against dataset.
+        
+        Args:
+            skip_file_validation: If True, skip validating file existence
+                                (useful during initial sync)
         
         Returns:
             Validation result with statistics
@@ -211,30 +222,38 @@ class DatasetComponentSchema:
             required = config.get("required", False)
             multiple = config.get("multiple", False)
             
-            # Find matching files
-            found_files = list(self.dataset_path.rglob(pattern))
-            tracks_files = self._group_by_track(found_files)
-            
-            result.stats[name] = {
-                "matched_files": len(found_files),
-                "matched_tracks": len(tracks_files)
-            }
-            
-            # Validate requirements
-            if required and not found_files:
-                result.add_error(f"Required component {name} has no matching files")
+            if not skip_file_validation:
+                # Find matching files
+                found_files = list(self.dataset_path.rglob(pattern))
+                tracks_files = self._group_by_track(found_files)
                 
-            # Validate multiple constraint
-            if not multiple:
-                multiple_files = [track for track, files in tracks_files.items() if len(files) > 1]
-                if multiple_files:
-                    result.add_error(
-                        f"Component {name} has multiple files for {len(multiple_files)} tracks "
-                        f"but multiple=False"
-                    )
+                result.stats[name] = {
+                    "matched_files": len(found_files),
+                    "matched_tracks": len(tracks_files)
+                }
+                
+                # Validate requirements
+                if required and not found_files:
+                    result.add_error(f"Required component {name} has no matching files")
+                    
+                # Validate multiple constraint
+                if not multiple:
+                    multiple_files = [track for track, files in tracks_files.items() if len(files) > 1]
+                    if multiple_files:
+                        result.add_error(
+                            f"Component {name} has multiple files for {len(multiple_files)} tracks "
+                            f"but multiple=False"
+                        )
+            else:
+                # Skip file validation, just validate component configuration
+                result.stats[name] = {
+                    "matched_files": 0,
+                    "matched_tracks": 0,
+                    "validation_skipped": True
+                }
         
         # Validate directory structure
-        if not self._validate_directory_structure(result):
+        if not skip_file_validation and not self._validate_directory_structure(result):
             result.add_error("Invalid directory structure found")
         
         return result
@@ -551,7 +570,7 @@ class DatasetComponentSchema:
             }
         
         # Add any missing required components
-        for component_name in ['instrumental']:
+        for component_name in ['instrumental_audio']:
             if component_name not in discovered_components and component_name in files_by_base_pattern:
                 files = files_by_base_pattern[component_name]
                 if len(files) >= total_tracks * 0.05:  # At least 5% coverage

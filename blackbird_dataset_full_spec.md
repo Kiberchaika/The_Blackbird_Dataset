@@ -44,7 +44,12 @@ The schema system defines ONLY the types of files (components) that can exist fo
 4. Whether multiple files of a component are allowed per track
 5. Human-readable descriptions of each component's purpose
 
-#### Schema Discovery
+When syncing from a remote source, only the components that were specifically requested for sync are pulled from the remote schema. This ensures that:
+1. The local schema only contains components that are actually being used
+2. Different machines can maintain different subsets of components based on their needs
+3. The schema stays minimal and relevant to the local dataset
+
+### 2.1 Schema Discovery
 
 The schema discovery process automatically analyzes the dataset structure to generate a schema that matches the existing files. This is done through the `discover_schema` method which:
 
@@ -227,10 +232,13 @@ Blackbird uses WebDAV for dataset synchronization, with several key features:
 
 The sync process begins with schema handling:
 
-1. **Remote Schema Reading**
+1. **Remote Schema Component Reading**
    ```python
-   # First, read remote schema to understand available components
+   # First, read the remote schema
    remote_schema = client.read_file(".blackbird/schema.json")
+   
+   # If components are specified, only sync those
+   components_to_sync = components if components else remote_schema["components"].keys()
    ```
 
 2. **Selective Schema Update**
@@ -240,6 +248,10 @@ The sync process begins with schema handling:
      a. File pattern discovery
      b. Component type descriptions
      c. Validation of requested components
+   - By default, all components from remote schema are pulled
+   - If specific components are requested, only those are pulled
+   - Local schema is created if it doesn't exist
+   - Components are validated against remote schema before sync starts
 
 Example schema merge:
 ```python
@@ -275,7 +287,7 @@ merged_schema = {
    - Use remote patterns to locate files
    - Fail fast if components not found
 
-#### 3.3 Selective Component Sync
+#### 3.4 Selective Component Sync
 ```python
 dataset.sync_from_remote(
     client,
@@ -286,13 +298,13 @@ dataset.sync_from_remote(
 - Uses remote schema patterns to find relevant files
 - Maintains component consistency between datasets
 
-#### 3.4 Resumable Operations
+#### 3.5 Resumable Operations
 - Tracks sync state in `sync_state.json`
 - Records successfully synced files
 - Can resume interrupted syncs
 - Tracks progress and completed bytes
 
-#### 3.5 Progress Tracking
+#### 3.6 Progress Tracking
 - Real-time progress updates
 - File counts and byte totals
 - Error tracking with detailed messages

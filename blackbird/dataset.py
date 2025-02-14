@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Callable
-from .schema import DatasetComponentSchema, SchemaValidationResult
+from .schema import DatasetComponentSchema, ValidationResult
 from collections import defaultdict
 import logging
 import fnmatch
@@ -20,7 +20,7 @@ class Dataset:
         self.path = Path(path)
         self.schema = DatasetComponentSchema(self.path)
         
-    def validate(self) -> SchemaValidationResult:
+    def validate(self) -> ValidationResult:
         """Validate entire dataset against schema.
         
         Returns:

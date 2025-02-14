@@ -69,6 +69,7 @@ The schema discovery process automatically analyzes the dataset structure to gen
    - Determines if components allow multiple files per track
    - Calculates track coverage for each component
    - Identifies section-based components (e.g., stretched vocals with multiple sections)
+   - Section-based components MUST have a number as the last part before the file extension (e.g., `_section1.mp3`, `_section42.json`)
    - Assigns meaningful descriptions to each component
 
 4. **Statistics Generation**
@@ -126,6 +127,15 @@ for name, config in schema.schema["components"].items():
    - Special handling for audio files (adds `_audio` suffix)
    - Special handling for JSON files with lyrics (adds `_lyrics` suffix)
    - Section components get `_section` suffix
+
+5. **Multiple Files Per Component**
+   - Components can be configured to allow multiple files per base track
+   - To enable multiple files, the following strict naming convention MUST be followed:
+     - Files must have a number as the last part before the extension
+     - Example: `track_vocals1.mp3`, `track_vocals2.mp3`, etc.
+   - This is the ONLY supported format for components with multiple files
+   - Numbers can be any length and indicate the sequence within the component
+   - Files without this exact format will not be recognized as part of a multiple-file component
 
 Example schema.json:
 ```json
@@ -781,164 +791,146 @@ Blackbird maintains a lightweight, fast index of the dataset for efficient opera
 @dataclass
 class TrackInfo:
     """Track information in the index."""
-    track_path: str      # Relative path identifying the track
-    artist: str
-    album: str
-    cd_number: str       # None for non-CD tracks
-    base_name: str       # Track name without component suffixes
-    components: Dict[str, str]  # Component type -> file path
+    track_path: str      # Relative path identifying the track (artist/album/[cd]/track)
+    artist: str         # Artist name
+    album_path: str     # Full path to album (artist/album)
+    cd_number: Optional[str]  # CD number if present
+    base_name: str      # Track name without component suffixes
+    files: Dict[str, str]  # component_name -> file_path mapping
+    file_sizes: Dict[str, int]  # file_path -> size in bytes
 
 @dataclass
 class DatasetIndex:
     """Main index structure."""
+    last_updated: datetime
     tracks: Dict[str, TrackInfo]  # track_path -> TrackInfo
-    artists: Set[str]
-    albums: Dict[str, Set[str]]   # artist -> set of albums
-    
-    def save(self, path: Path):
-        """Save index to pickle file."""
-        with open(path, 'wb') as f:
-            pickle.dump(self, f, protocol=5)
-    
-    @classmethod
-    def load(cls, path: Path) -> 'DatasetIndex':
-        """Load index from pickle file."""
-        with open(path, 'rb') as f:
-            return pickle.load(f)
+    track_by_album: Dict[str, Set[str]]  # album_path -> set of track_paths
+    album_by_artist: Dict[str, Set[str]]  # artist_name -> set of album_paths
+    total_size: int  # Total size of all indexed files
+    version: str = "1.0"
 ```
 
-### Dataset Statistics
+The index provides efficient access to:
+1. Track information by path
+2. All tracks in an album
+3. All albums by an artist
+4. File sizes for verification during sync
+5. Component files for each track
 
-The indexer also maintains dataset statistics in `.blackbird/stats.json`:
+### Search Capabilities
 
-```json
-{
-    "last_updated": "2024-03-14T12:00:00Z",
-    "total_size_bytes": 1234567890,
-    "file_count": {
-        "total": 1000,
-        "by_component": {
-            "instrumental": 500,
-            "vocals": 300,
-            "mir": 200
-        }
-    },
-    "track_count": {
-        "total": 500,
-        "by_artist": {
-            "Artist1": 200,
-            "Artist2": 300
-        }
-    },
-    "artist_count": 2,
-    "album_count": 10
-}
-```
+The index supports several search operations:
 
-These statistics are used to:
-1. Display dataset information
-2. Calculate sync progress when pulling from remote
-3. Provide accurate progress during operations
+1. **Artist Search**
+   ```python
+   # Case-insensitive search by default
+   artists = index.search_by_artist("artist")
+   
+   # Case-sensitive search
+   artists = index.search_by_artist("Artist1", case_sensitive=True)
+   ```
 
-### Index Operations
+2. **Album Search**
+   ```python
+   # Search all albums
+   albums = index.search_by_album("Album")
+   
+   # Search albums by specific artist
+   albums = index.search_by_album("Album", artist="Artist1")
+   ```
 
-#### 1. Building/Rebuilding Index
+3. **Track Search**
+   ```python
+   # Search all tracks
+   tracks = index.search_by_track("Track")
+   
+   # Search with filters
+   tracks = index.search_by_track("Track", 
+                                artist="Artist1", 
+                                album="Artist1/Album1")
+   ```
 
-From code:
+### Index Building
+
+The index is built by scanning the dataset and grouping files by their components:
+
+1. **Directory Scanning**
+   - Uses `os.walk` for efficient directory traversal
+   - Shows real-time progress with tqdm
+   - Counts files and calculates total size
+
+2. **Component Grouping**
+   - Groups files by their component patterns
+   - Creates lookup tables for efficient access
+   - Handles CD-based album structures
+
+3. **Track Organization**
+   - Groups related files by base name
+   - Creates track paths for unique identification
+   - Maintains file size information
+
+Example index building:
 ```python
-# Index is built automatically when needed
-dataset = Dataset("/path/to/dataset", build_index=True)
+# Build index with progress tracking
+index = build_index(dataset_path, schema)
 
-# Or manually rebuild
-dataset.rebuild_index()  # Shows progress bar by default
+# Save index
+index.save(index_path)
 ```
 
-From CLI:
-```bash
-blackbird index rebuild /path/to/dataset
+### Synchronization with Index
+
+The sync process uses the index for efficient file transfer:
+
+1. **Component Selection**
+   ```python
+   sync = DatasetSync(local_path)
+   stats = sync.sync(
+       client,
+       components=["vocals", "mir"],
+       artists=["Artist1"],
+       resume=True
+   )
+   ```
+
+2. **File Discovery**
+   - Uses index instead of scanning remote server
+   - Knows exact files and sizes upfront
+   - Can calculate total size before starting
+
+3. **Progress Tracking**
+   ```python
+   @dataclass
+   class SyncStats:
+       total_files: int = 0
+       synced_files: int = 0
+       failed_files: int = 0
+       skipped_files: int = 0
+       total_size: int = 0
+       synced_size: int = 0
+   ```
+
+4. **Resume Support**
+   - Verifies existing files by size
+   - Skips correctly synced files
+   - Tracks sync progress
+
+5. **Error Handling**
+   - Validates file sizes after download
+   - Removes failed downloads
+   - Provides detailed error reporting
+
+Example sync output:
 ```
+Collecting files to sync...
+Found 1000 files to sync (50.5 GB)
+Syncing files: 100% |████████| 1000/1000 [02:30<00:00, 6.67 files/s]
 
-Progress tracking:
-1. Use filesystem block counting for fast work estimation
-2. Track progress based on processed data size
-3. Display progress bar using tqdm
-4. Update both index and statistics files
-
-#### 2. Incremental Updates
-
-```python
-# After sync completion
-dataset.update_index()  # Updates both index and stats
-```
-
-#### 3. Using Index for Operations
-
-```python
-# Find tracks using index (enabled by default)
-tracks = dataset.find_tracks(
-    artist="Artist1",
-    components=["vocals"]
-)
-
-# Text-based search
-results = dataset.search("keyword")
-```
-
-### Index Performance
-
-1. **Build Time vs Search Time**
-   - Initial build: O(n) where n is total file count
-   - Search operations: O(1) using dictionary lookups
-   - Text search: O(n) but on small metadata only
-
-2. **Memory Usage**
-   - Minimal memory footprint
-   - Only stores file paths and metadata
-   - No file contents or large data structures
-
-3. **Disk Space**
-   - Extremely lightweight (typically under 50MB)
-   - Only stores file paths and basic metadata
-   - No duplicate data or binary content
-
-### Test Coverage
-
-```python
-def test_index_build(test_dataset):
-    """Test index building and verification."""
-    dataset = Dataset(test_dataset, build_index=True)
-    
-    # Verify index contents
-    assert len(dataset.index.tracks) == 4
-    assert len(dataset.index.artists) == 2
-    
-    # Verify stats file
-    with open(dataset.path / ".blackbird" / "stats.json") as f:
-        stats = json.load(f)
-        assert stats["track_count"]["total"] == 4
-        assert stats["artist_count"] == 2
-    
-def test_index_search(test_dataset):
-    """Test index-based search operations."""
-    dataset = Dataset(test_dataset, build_index=True)
-    
-    # Search by component
-    tracks = dataset.find_tracks(components=["vocals"])
-    assert len(tracks) == 2
-    
-    # Search by text
-    results = dataset.search("Artist1")
-    assert len(results) == 2
-    
-def test_index_update(test_dataset):
-    """Test incremental index updates."""
-    dataset = Dataset(test_dataset, build_index=True)
-    
-    # Add new file
-    new_file = test_dataset / "Artist1/Album1/new_track.mp3"
-    new_file.touch()
-    
-    # Update should catch new file
-    dataset.update_index()
-    assert dataset.index.tracks[new_file.name] is not None
+Sync completed!
+Total files: 1000
+Successfully synced: 950
+Failed: 10
+Skipped: 40
+Total size: 50.5 GB
+Synced size: 48.2 GB
 ``` 

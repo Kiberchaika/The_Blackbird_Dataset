@@ -17,7 +17,7 @@ def test_dataset(tmp_path):
             "pattern": "*_vocals_noreverb.mp3",
             "required": False
         },
-        "mir": {
+        "mir.json": {
             "pattern": "*.mir.json",
             "required": False
         }
@@ -87,7 +87,7 @@ def test_find_tracks_with_components(test_dataset):
     assert len(tracks_with_vocals) == 2
     
     # Find tracks with both vocals and mir
-    complete_tracks = dataset.find_tracks(has=["vocals", "mir"])
+    complete_tracks = dataset.find_tracks(has=["vocals", "mir.json"])
     assert len(complete_tracks) == 1
     track_path = next(iter(complete_tracks.keys()))
     assert str(Path(track_path)) == "Artist1/Album1/track1"
@@ -137,7 +137,7 @@ def test_analyze_dataset(test_dataset):
     assert len(stats["artists"]) == 2
     assert stats["components"]["instrumental"] == 4  # All tracks have instrumental
     assert stats["components"]["vocals"] == 2  # Two tracks have vocals
-    assert stats["components"]["mir"] == 2  # Two tracks have MIR
+    assert stats["components"]["mir.json"] == 2  # Two tracks have MIR
     
     # Check artist-specific stats
     assert stats["tracks"]["by_artist"]["Artist1"] == 2

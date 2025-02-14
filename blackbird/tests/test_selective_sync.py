@@ -4,6 +4,11 @@ import itertools
 import shutil
 from pathlib import Path
 from blackbird.sync import DatasetSync, SyncState
+import pytest
+from unittest.mock import MagicMock, patch
+from blackbird.sync import SyncStats
+from blackbird.schema import DatasetComponentSchema
+from blackbird.index import DatasetIndex, TrackInfo
 
 # Enable debug logging for blackbird module
 logging.getLogger('blackbird').setLevel(logging.DEBUG)
@@ -80,6 +85,230 @@ def main():
     print("\nFinal directory structure:")
     for item in list_directory_contents(os.path.join(LOCAL_TEST_DIR, TEST_ARTIST)):
         print(item)
+
+@pytest.fixture
+def test_dir(tmp_path):
+    """Create a test directory with schema and index."""
+    test_dir = tmp_path / "test_sync_data"
+    test_dir.mkdir()
+    
+    # Create .blackbird directory
+    blackbird_dir = test_dir / ".blackbird"
+    blackbird_dir.mkdir()
+    
+    # Create schema
+    schema = DatasetComponentSchema.create(test_dir)
+    schema.schema["components"].update({
+        "instrumental_audio": {
+            "pattern": "*_instrumental.mp3",
+            "required": True
+        },
+        "vocals_audio": {
+            "pattern": "*_vocals_noreverb.mp3",
+            "required": False
+        },
+        "mir": {
+            "pattern": "*.mir.json",
+            "required": False
+        }
+    })
+    schema.save()
+    
+    # Create index
+    index = DatasetIndex.create()
+    
+    # Add test tracks
+    track1 = TrackInfo(
+        track_path="19_84/Album1/Track1",
+        artist="19_84",
+        album_path="19_84/Album1",
+        cd_number=None,
+        base_name="Track1",
+        files={
+            "instrumental_audio": "19_84/Album1/Track1_instrumental.mp3",
+            "vocals_audio": "19_84/Album1/Track1_vocals_noreverb.mp3",
+            "mir": "19_84/Album1/Track1.mir.json"
+        },
+        file_sizes={
+            "19_84/Album1/Track1_instrumental.mp3": 1000000,
+            "19_84/Album1/Track1_vocals_noreverb.mp3": 800000,
+            "19_84/Album1/Track1.mir.json": 5000
+        }
+    )
+    
+    track2 = TrackInfo(
+        track_path="19_84/Album1/Track2",
+        artist="19_84",
+        album_path="19_84/Album1",
+        cd_number=None,
+        base_name="Track2",
+        files={
+            "instrumental_audio": "19_84/Album1/Track2_instrumental.mp3",
+            "vocals_audio": "19_84/Album1/Track2_vocals_noreverb.mp3"
+        },
+        file_sizes={
+            "19_84/Album1/Track2_instrumental.mp3": 1200000,
+            "19_84/Album1/Track2_vocals_noreverb.mp3": 900000
+        }
+    )
+    
+    # Add tracks to index
+    for track in [track1, track2]:
+        index.tracks[track.track_path] = track
+        index.track_by_album.setdefault(track.album_path, set()).add(track.track_path)
+        index.album_by_artist.setdefault(track.artist, set()).add(track.album_path)
+        index.total_size += sum(track.file_sizes.values())
+    
+    # Save index
+    index.save(blackbird_dir / "index.pickle")
+    
+    return test_dir
+
+@pytest.fixture
+def mock_webdav_client():
+    """Create a mock WebDAV client."""
+    client = MagicMock()
+    client.download_sync = MagicMock()
+    return client
+
+def test_sync_initialization(test_dir):
+    """Test sync manager initialization."""
+    sync = DatasetSync(test_dir)
+    assert sync.local_path == test_dir
+    assert sync.schema is not None
+    assert sync.index is not None
+
+def test_sync_with_invalid_component(test_dir, mock_webdav_client):
+    """Test sync with invalid component."""
+    sync = DatasetSync(test_dir)
+    with pytest.raises(ValueError, match="Invalid components"):
+        sync.sync(mock_webdav_client, components=["nonexistent"])
+
+def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
+    """Test syncing specific components for a specific artist."""
+    sync = DatasetSync(test_dir)
+    
+    # Mock successful downloads
+    def mock_download(remote_path, local_path):
+        # Create file with correct size based on the track and file
+        path = Path(local_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Find the track that has this file
+        file_size = None
+        for track in sync.index.tracks.values():
+            if remote_path in track.file_sizes:
+                file_size = track.file_sizes[remote_path]
+                break
+        
+        if file_size is None:
+            raise ValueError(f"File not found in index: {remote_path}")
+        
+        with open(path, 'wb') as f:
+            f.write(b'0' * file_size)
+    
+    mock_webdav_client.download_sync.side_effect = mock_download
+    
+    # Sync instrumental files
+    stats = sync.sync(
+        mock_webdav_client,
+        components=["instrumental_audio"],
+        artists=["19_84"]
+    )
+    
+    assert stats.total_files == 2  # Two instrumental files
+    assert stats.synced_files == 2
+    assert stats.failed_files == 0
+    
+    # Verify the correct files were synced
+    assert mock_webdav_client.download_sync.call_count == 2
+    calls = mock_webdav_client.download_sync.call_args_list
+    assert any("Track1_instrumental.mp3" in str(call) for call in calls)
+    assert any("Track2_instrumental.mp3" in str(call) for call in calls)
+
+def test_sync_resume(test_dir, mock_webdav_client):
+    """Test resuming sync with existing files."""
+    sync = DatasetSync(test_dir)
+    
+    # Create an existing file with correct size
+    existing_file = test_dir / "19_84/Album1/Track1_instrumental.mp3"
+    existing_file.parent.mkdir(parents=True)
+    with open(existing_file, 'wb') as f:
+        f.write(b'0' * 1000000)  # Size from track1's file_sizes
+    
+    # Mock successful downloads
+    def mock_download(remote_path, local_path):
+        # Create file with correct size based on the track and file
+        path = Path(local_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Find the track that has this file
+        file_size = None
+        for track in sync.index.tracks.values():
+            if remote_path in track.file_sizes:
+                file_size = track.file_sizes[remote_path]
+                break
+        
+        if file_size is None:
+            raise ValueError(f"File not found in index: {remote_path}")
+        
+        with open(path, 'wb') as f:
+            f.write(b'0' * file_size)
+    
+    mock_webdav_client.download_sync.side_effect = mock_download
+    
+    # Sync with resume
+    stats = sync.sync(
+        mock_webdav_client,
+        components=["instrumental_audio"],
+        artists=["19_84"],
+        resume=True
+    )
+    
+    assert stats.total_files == 2
+    assert stats.synced_files == 1  # Only one file should be synced
+    assert stats.skipped_files == 1  # One file should be skipped
+    assert stats.failed_files == 0
+
+def test_sync_error_handling(test_dir, mock_webdav_client):
+    """Test handling of sync errors."""
+    sync = DatasetSync(test_dir)
+    
+    # Mock failed download
+    def mock_download(remote_path, local_path):
+        if "Track1" in remote_path:
+            raise Exception("Download failed")
+        
+        # Create file with correct size based on the track and file
+        path = Path(local_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Find the track that has this file
+        file_size = None
+        for track in sync.index.tracks.values():
+            if remote_path in track.file_sizes:
+                file_size = track.file_sizes[remote_path]
+                break
+        
+        if file_size is None:
+            raise ValueError(f"File not found in index: {remote_path}")
+        
+        with open(path, 'wb') as f:
+            f.write(b'0' * file_size)
+    
+    mock_webdav_client.download_sync.side_effect = mock_download
+    
+    # Sync with some failures
+    stats = sync.sync(
+        mock_webdav_client,
+        components=["instrumental_audio"],
+        artists=["19_84"]
+    )
+    
+    assert stats.total_files == 2
+    assert stats.synced_files == 1
+    assert stats.failed_files == 1
+    assert stats.skipped_files == 0
 
 if __name__ == "__main__":
     main() 

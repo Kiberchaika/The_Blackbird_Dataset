@@ -43,7 +43,7 @@ def main():
             "required": False,
             "description": "Lyrics and timing information"
         },
-        "mir": {
+        "mir.json": {
             "pattern": "*.mir.json",
             "required": False,
             "description": "Music Information Retrieval analysis data"
@@ -113,7 +113,7 @@ def main():
     # 1. Find tracks with all components
     print("Finding tracks with all components...")
     complete_tracks = dataset.find_tracks(
-        has=["instrumental", "vocals", "mir"],
+        has=["instrumental", "vocals", "mir.json"],
         progress_callback=show_progress
     )
     print("\nSearch complete!")

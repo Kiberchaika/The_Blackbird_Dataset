@@ -54,32 +54,12 @@ When syncing from a remote source, only the components that were specifically re
 The schema discovery process automatically analyzes the dataset structure to generate a schema that matches the existing files. This is done through the `discover_schema` method which:
 
 1. **Component Detection**
-   - Analyzes file patterns and suffixes to identify distinct components
-   - Groups files by their base patterns (e.g., `_instrumental.mp3`, `_vocals_noreverb.json`)
-   - Detects special cases like MIR files and section-based components
-   - Preserves full file extensions in patterns (e.g., `.mp3`, `.mir.json`)
+   - Component file naming pattern is the file extension plus everything that precedes it if there's any amount of characters that start with _ in the end of the file name before the extension.
+   E.g. `track1_vocals_stretched_120bpm.mp3` has the component pattern `vocals_stretched_120bpm.mp3`
+   - A special case of component is a multiple file component that has a number right before the file extension.
+   E.g. `track1_vocals_stretched_120bpm_section1.mp3` has the component pattern `vocals_stretched_120bpm_section*.mp3`
+   - Component name/id can be descriptive, but the component pattern is used to find the actual files
 
-2. **Pattern Analysis**
-   - Determines glob patterns that uniquely identify each component
-   - Handles variations in file extensions and naming conventions
-   - Supports both simple patterns (e.g., `*_instrumental.mp3`) and complex ones (e.g., `*_vocals_stretched_*section*.mp3`)
-   - File extensions are considered part of the pattern and must match exactly
-
-3. **Component Properties**
-   - Determines if components allow multiple files per track
-   - Calculates track coverage for each component
-   - Identifies section-based components (e.g., stretched vocals with multiple sections)
-   - Section-based components MUST have a number as the last part before the file extension (e.g., `_section1.mp3`, `_section42.json`)
-   - Assigns meaningful descriptions to each component
-
-4. **Statistics Generation**
-   For each discovered component, tracks:
-   - Total file count
-   - Track coverage percentage
-   - Number of unique tracks
-   - Files per track (min/max)
-   - File extensions
-   - Section presence
 
 Example discovery usage:
 ```python
@@ -88,7 +68,7 @@ Example discovery usage:
 
 # Or programmatically
 schema = DatasetComponentSchema(dataset_path)
-result = schema.discover_schema(folders=["Artist/Album"])  # Optional folder filter
+schema.discover_schema(folders=["Artist/Album"])  # Optional folder filter
 
 # Access discovered components
 for name, config in schema.schema["components"].items():

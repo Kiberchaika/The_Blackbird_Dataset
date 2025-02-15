@@ -1,11 +1,25 @@
 from pathlib import Path
 import json
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Tuple, Set
 from dataclasses import dataclass
 import fnmatch
 import pickle
 import os
 from collections import defaultdict
+import re
+
+class SchemaDiscoveryResult:
+    """Result of schema discovery."""
+
+    def __init__(self, is_valid: bool, stats: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize schema discovery result.
+
+        Args:
+            is_valid: Whether the schema discovery was successful
+            stats: Optional statistics about discovered components
+        """
+        self.is_valid = is_valid
+        self.stats = stats or {}
 
 @dataclass
 class ValidationResult:
@@ -82,13 +96,13 @@ class DatasetComponentSchema:
         })
         
         # Check for pattern collisions first
-        seen_patterns = set()
+        seen_patterns = {}  # pattern -> component_name mapping
         for comp_name, comp_info in self.schema["components"].items():
             pattern = comp_info["pattern"]
             if pattern in seen_patterns:
-                result.add_error(f"Pattern collision between components: {pattern}")
+                result.add_error(f"Pattern collision between components '{comp_name}' and '{seen_patterns[pattern]}': {pattern}")
                 return result  # Return early if we find a collision
-            seen_patterns.add(pattern)
+            seen_patterns[pattern] = comp_name
         
         # Check directory structure
         for root, _, files in os.walk(self.dataset_path):
@@ -124,297 +138,231 @@ class DatasetComponentSchema:
                 for file in files:
                     if "_instrumental.mp3" in file:
                         result.stats["directory_structure"]["tracks"] += 1
-        
+            
         return result
 
-    def discover_schema(self, folders: Optional[List[str]] = None) -> ValidationResult:
-        """Discover schema from dataset files.
-        
-        Args:
-            folders: Optional list of folders to analyze (relative to dataset root)
-            
-        Returns:
-            Validation result with discovered schema
-        """
-        result = ValidationResult(is_valid=True, errors=[], warnings=[], stats={})
-        
-        # Try to load index if available
-        index_path = self.dataset_path / ".blackbird" / "index.pickle"
-        if index_path.exists():
-            with open(index_path, 'rb') as f:
-                index = pickle.load(f)
-                return self._discover_from_index(index, folders, result)
-        
-        # If no index, discover directly from filesystem
-        return self._discover_from_filesystem(folders, result)
+    def discover_schema(self, folders: Optional[List[str]] = None) -> SchemaDiscoveryResult:
+        """Discover schema by analyzing the dataset.
 
-    def _discover_from_index(self, index, folders, result):
-        # Reset components for discovery
-        self.schema["components"] = {}
-            
-        # Collect all unique file patterns
-        patterns = defaultdict(lambda: {
-            "count": 0,
-            "tracks": set(),
-            "files_per_track": defaultdict(int),
-            "extensions": set(),
-            "has_sections": False
-        })
+        Args:
+            folders: Optional list of folders to analyze. If not provided,
+                    analyzes the entire dataset.
+
+        Returns:
+            SchemaDiscoveryResult indicating success and containing any errors
+        """
+        print(f"\nStarting discover_schema with folders: {folders}")
         
-        # Process each track
-        for track_path, track_info in index.tracks.items():
-            # Skip if not in requested folders
-            if folders:
-                if not any(track_path.startswith(f) for f in folders):
+        # Reset schema for discovery
+        self.schema = {
+            "components": {},
+            "structure": {},
+            "sync": {}
+        }
+
+        # If folders are specified, analyze each folder, otherwise analyze the entire dataset
+        if folders:
+            all_postfix_groups = defaultdict(lambda: defaultdict(set))
+            all_base_names = set()
+            all_unmatched = set()
+            
+            for folder in folders:
+                folder_path = self.dataset_path / folder
+                if not folder_path.exists():
+                    print(f"Warning: Folder {folder_path} does not exist")
                     continue
                     
-            # Group files by pattern
-            for file_path in track_info.files:
-                file_name = Path(file_path).name
-                base_name = Path(file_path).stem
+                postfix_groups, base_names, unmatched = self._analyze_file_patterns_in_directory(str(folder_path))
                 
-                # Extract pattern
-                pattern = None
-                component_name = None
-                
-                if "_instrumental.mp3" in file_name:
-                    pattern = "*_instrumental.mp3"
-                    component_name = "instrumental"
-                elif "_vocals_noreverb.mp3" in file_name:
-                    pattern = "*_vocals_noreverb.mp3"
-                    component_name = "vocals_noreverb"
-                elif ".mir.json" in file_name:
-                    pattern = "*.mir.json"
-                    component_name = "mir"
-                elif "_section" in file_name:
-                    pattern = f"*{file_name[len(base_name):]}"
-                    component_name = "section"
-                    patterns[pattern]["has_sections"] = True
-                
-                if pattern and component_name:
-                    patterns[pattern]["count"] += 1
-                    patterns[pattern]["tracks"].add(track_path)
-                    patterns[pattern]["files_per_track"][track_path] += 1
-                    patterns[pattern]["extensions"].add(Path(file_name).suffix)
-                    patterns[pattern]["component_name"] = component_name
-        
-        # Update schema components
-        for pattern, stats in patterns.items():
-            component_name = stats.get("component_name", pattern[1:].split('.')[0])
-            
-            # Add component
+                # Merge results
+                for postfix, tracks in postfix_groups.items():
+                    for base_name, files in tracks.items():
+                        all_postfix_groups[postfix][base_name].update(files)
+                all_base_names.update(base_names)
+                all_unmatched.update(unmatched)
+        else:
+            # Analyze entire dataset
+            all_postfix_groups, all_base_names, all_unmatched = self._analyze_file_patterns_in_directory(str(self.dataset_path))
+
+        # Prepare stats for the result
+        stats = {
+            "total_files": sum(len(files) for tracks in all_postfix_groups.values() for files in tracks.values()),
+            "base_names": len(all_base_names),
+            "unmatched_files": len(all_unmatched),
+            "components": {}
+        }
+
+        # Convert postfix analysis into schema components
+        for postfix, tracks in all_postfix_groups.items():
+            # Skip empty postfixes
+            if not postfix:
+                continue
+
+            # Determine component name and pattern
+            if postfix.startswith('_'):
+                # For postfixes starting with underscore, extract name and extension
+                base_part = postfix[1:].split('.')[0]  # Get part between _ and first .
+                ext = ''.join(postfix.split('.')[1:])  # Get all extensions combined
+                if '*' in base_part:
+                    # For numbered sections, include the extension in component name
+                    component_name = f"{base_part}_{ext}"
+                else:
+                    component_name = base_part
+                pattern = f"*{postfix}"
+            else:
+                # For files without underscore prefix (like .mir.json),
+                # use the full extension (including dots) as component name
+                component_name = postfix.lstrip('.')  # Remove leading dot but keep internal dots
+                pattern = f"*{postfix}"
+
+            # Handle numbered sections
+            is_multiple = '*' in postfix
+
+            # Add component to schema
             self.schema["components"][component_name] = {
                 "pattern": pattern,
-                "required": component_name == "instrumental",
-                "multiple": stats["has_sections"] or max(stats["files_per_track"].values()) > 1
+                "required": False,  # Never set required by default
+                "multiple": is_multiple
             }
-            
-            # Add statistics
-            result.stats[component_name] = {
-                "file_count": stats["count"],
-                "track_coverage": len(stats["tracks"]) / len(index.tracks),
-                "unique_tracks": len(stats["tracks"]),
-                "min_files_per_track": min(stats["files_per_track"].values()),
-                "max_files_per_track": max(stats["files_per_track"].values()),
-                "extensions": sorted(stats["extensions"]),
-                "has_sections": stats["has_sections"]
+
+            # Calculate track coverage
+            total_tracks = len(all_base_names)
+            tracks_with_component = len(tracks)
+            missing_track_names = all_base_names - set(tracks.keys())
+            track_coverage = tracks_with_component / total_tracks if total_tracks > 0 else 0.0
+
+            # Add component stats
+            stats["components"][component_name] = {
+                "pattern": pattern,
+                "track_count": len(tracks),
+                "file_count": sum(len(files) for files in tracks.values()),
+                "is_multiple": is_multiple,
+                "track_coverage": track_coverage,
+                "has_sections": is_multiple,
+                "unique_tracks": tracks_with_component
             }
-        
-        return result
 
-    def _get_pattern_from_path(self, file_path: str) -> str:
-        """Get pattern from file path."""
-        base_name = os.path.basename(file_path)
-        return f"*{base_name[base_name.find('_'):]}"
-
-    def _discover_from_filesystem(self, folders: Optional[List[str]], result: ValidationResult) -> ValidationResult:
-        """Discover schema by scanning filesystem.
-        
-        Args:
-            folders: Optional list of folders to analyze
-            result: ValidationResult to update
-            
-        Returns:
-            Updated validation result
-        """
-        # Reset components for discovery
-        self.schema["components"] = {}
-        
-        # Initialize result stats
-        result.stats = {
-            'unmatched': {
-                'file_count': 0,
-                'track_coverage': 0,
-                'unique_tracks': 0,
-                'min_files_per_track': 0,
-                'max_files_per_track': 0,
-                'extensions': [],
-                'has_sections': False,
-                'has_multiple': False
+        # Add structure configuration
+        self.schema["structure"] = {
+            "artist_album_format": {
+                "levels": ["artist", "album", "?cd", "track"],
+                "cd_pattern": "CD\\d+",
+                "is_cd_optional": True
             }
         }
 
-        # First pass: collect all files and their patterns
-        pattern_stats = {}
-        pattern_groups = defaultdict(list)
-        for track_path in self._list_tracks(self.dataset_path):
-            # Skip if not in requested folders
-            if folders and not any(track_path.startswith(f) for f in folders):
-                continue
-                
-            track_files = self._list_track_files(track_path)
-            for file_path in track_files:
-                pattern = self._get_pattern_from_path(file_path)
-                if pattern not in pattern_stats:
-                    pattern_stats[pattern] = {
-                        'count': 0,
-                        'tracks': set(),
-                        'files_per_track': defaultdict(int),
-                        'extensions': set(),
-                        'has_sections': False,
-                        'has_multiple': False,
-                        'component_name': None,
-                        'examples': set(),
-                        'base_component': None
-                    }
-                stats = pattern_stats[pattern]
-                stats['count'] += 1
-                stats['tracks'].add(track_path)
-                stats['files_per_track'][track_path] += 1
-                stats['extensions'].add(os.path.splitext(file_path)[1])
-                stats['examples'].add(os.path.basename(file_path))
+        # Add sync configuration
+        self.schema["sync"] = {
+            "exclude_patterns": ["*.tmp", "*.bak"]
+        }
 
-                # Extract component name from pattern
-                base_name = Path(file_path).stem
-                parts = base_name.split('_')
-                
-                # Check for numbered components (e.g. vocals1, vocals2, etc.)
-                component_name = None
-                for part in parts[1:]:  # Skip track name
-                    if part.rstrip('123456789') and part.endswith(tuple('123456789')):
-                        component_name = part.rstrip('123456789')
-                        stats['has_multiple'] = True
-                        stats['base_component'] = component_name
-                        break
-                
-                if not component_name:
-                    component_name = '_'.join(parts[1:])  # Everything after track name
-                
-                stats['component_name'] = component_name
-                pattern_groups[component_name].append(pattern)
-                
-                print(f"\nPattern: {pattern}")
-                print(f"Stats: {stats}")
+        return SchemaDiscoveryResult(is_valid=True, stats=stats)
 
-        print(f"\nComponent groups: {pattern_groups.keys()}")
+    def _find_base_name(self, filename: str) -> Optional[str]:
+        """Find base name from a single filename.
         
-        # Second pass: Process each component group
-        processed_components = set()
-        for component_name, patterns in pattern_groups.items():
-            print(f"\nProcessing pattern group for component: {component_name}")
+        Args:
+            filename: Name of file to analyze
             
-            if component_name in processed_components:
-                continue
-            
-            # Check if this is a numbered component group
-            base_component = None
-            for pattern in patterns:
-                stats = pattern_stats[pattern]
-                if stats.get('base_component'):
-                    base_component = stats['base_component']
-                    break
-            
-            if base_component:
-                # Find all patterns that belong to this base component
-                component_patterns = []
-                unmatched_patterns = []
-                for c_name, c_patterns in pattern_groups.items():
-                    if c_name == base_component or any(pattern_stats[p].get('base_component') == base_component for p in c_patterns):
-                        component_patterns.extend(c_patterns)
-                        processed_components.add(c_name)
-                    elif c_name.startswith(base_component):
-                        # These are unmatched patterns that start with the base component name
-                        unmatched_patterns.extend(c_patterns)
-                
-                # Aggregate stats for the base component
-                all_tracks = set()
-                all_extensions = set()
-                files_per_track = defaultdict(int)
-                unmatched_count = 0
-                
-                for pattern in component_patterns:
-                    stats = pattern_stats[pattern]
-                    all_tracks.update(stats['tracks'])
-                    all_extensions.update(stats['extensions'])
-                
-                # Calculate total count based on tracks and files per track
-                total_count = len(all_tracks) * 3  # Each track has exactly 3 numbered files
-                
-                # Count unmatched files
-                for pattern in unmatched_patterns:
-                    unmatched_count += pattern_stats[pattern]['count']
-                
-                # Update result stats for the base component
-                result.stats[base_component] = {
-                    'file_count': total_count,
-                    'track_coverage': len(all_tracks),
-                    'unique_tracks': len(all_tracks),
-                    'min_files_per_track': 3,  # Each track has exactly 3 files
-                    'max_files_per_track': 3,  # Each track has exactly 3 files
-                    'extensions': list(all_extensions),
-                    'has_sections': False,
-                    'has_multiple': True,
-                    'unmatched': unmatched_count  # Add unmatched files count
-                }
-                
-                # Add component to schema
-                self.schema['components'][base_component] = {
-                    'pattern': f'*_{base_component}[0-9]+{next(iter(all_extensions))}',
-                    'multiple': True,
-                    'required': False
-                }
-            else:
-                # Handle non-numbered components
-                pattern = patterns[0]  # Use first pattern as representative
-                stats = pattern_stats[pattern]
-                
-                # Update result stats for this component
-                result.stats[component_name] = {
-                    'file_count': stats['count'],
-                    'track_coverage': len(stats['tracks']),
-                    'unique_tracks': len(stats['tracks']),
-                    'min_files_per_track': min(stats['files_per_track'].values()),
-                    'max_files_per_track': max(stats['files_per_track'].values()),
-                    'extensions': list(stats['extensions']),
-                    'has_sections': stats['has_sections'],
-                    'has_multiple': stats['has_multiple'],
-                    'unmatched': 0  # Non-numbered components don't have unmatched files
-                }
-                
-                # Add component to schema
-                self.schema['components'][component_name] = {
-                    'pattern': pattern,
-                    'multiple': stats['has_multiple'],
-                    'required': component_name == 'instrumental'  # Only instrumental is required
-                }
-            processed_components.add(component_name)
+        Returns:
+            Base name if found, None otherwise
+        """
+        # Special case for compound extensions
+        if filename.endswith('.mir.json'):
+            return filename[:-9]  # Remove .mir.json
 
-        # Add structure and sync sections if not present
-        if "structure" not in self.schema:
-            self.schema["structure"] = {
-                "artist_album_format": {
-                    "levels": ["artist", "album", "?cd", "track"],
-                    "cd_pattern": "CD\\d+",
-                    "is_cd_optional": True
-                }
-            }
-            
-        if "sync" not in self.schema:
-            self.schema["sync"] = {
-                "exclude_patterns": ["*.tmp", "*.bak"]
-            }
+        # Get everything before first underscore or last dot
+        if '_' in filename:
+            return filename.split('_')[0]
+        return filename.rsplit('.', 1)[0]
+
+    def _extract_postfix(self, filename: str, base_name: str) -> Tuple[str, bool]:
+        """Extract postfix from filename using the known base name.
         
-        return result
+        Args:
+            filename: Name of file to analyze
+            base_name: Known base name of the file
+            
+        Returns:
+            Tuple of (postfix, is_numbered) where:
+            - postfix is the extracted pattern
+            - is_numbered indicates if this is a numbered section pattern
+        """
+        # Remove base name to get the postfix part
+        postfix = filename[len(base_name):]
+        
+        # Check for numbered section pattern - look for numbers before the extension
+        section_match = re.search(r"(_.+?)(\d+)([.][^.]+)$", postfix)
+        if section_match:
+            # Get everything from first underscore up to the number, then add * and extension
+            pattern_part = section_match.group(1)  # Everything from _ up to the number
+            ext = section_match.group(3)  # The extension including the dot
+            return (f"{pattern_part}*{ext}", True)
+        
+        # Return the full postfix (includes leading underscore if present)
+        return (postfix, False)
+
+    def _analyze_file_patterns_in_directory(self, directory_path: str) -> Tuple[Dict[str, Dict[str, Set[str]]], Set[str], Set[str]]:
+        """Analyze files in a directory to discover components.
+        
+        Examines all files in the directory and its subdirectories to identify:
+        - Base names (track identifiers)
+        - Postfix patterns (component identifiers)
+        - Numbered section patterns
+        - Special cases like compound extensions
+        
+        Args:
+            directory_path: Path to directory to analyze
+            
+        Returns:
+            Tuple of:
+            - Dict mapping postfixes to Dict of base names to sets of files
+            - Set of base names
+            - Set of unmatched files
+        """
+        path = Path(directory_path)
+        if not path.exists() or not path.is_dir():
+            return defaultdict(lambda: defaultdict(set)), set(), set()
+
+        # Collect all files
+        all_files = set()
+        for file_path in path.rglob('*'):
+            if file_path.is_file() and '.blackbird' not in str(file_path):
+                all_files.add(file_path.name)
+
+        # Group files by potential base names
+        base_name_files = defaultdict(set)
+        for file in all_files:
+            base = self._find_base_name(file)
+            if base:
+                base_name_files[base].add(file)
+
+        # Analyze postfixes for each base name
+        postfix_groups = defaultdict(lambda: defaultdict(set))
+        unmatched_files = set(all_files)
+        base_names = set()
+
+        for base_name, files in base_name_files.items():
+            # Verify all files in this group start with base_name
+            if not all(f.startswith(base_name) for f in files):
+                continue
+
+            base_names.add(base_name)
+
+            # First pass: identify numbered components
+            numbered_components = set()
+            for file in files:
+                postfix, is_numbered = self._extract_postfix(file, base_name)
+                if is_numbered:
+                    numbered_components.add(postfix)
+
+            # Second pass: group files by postfix
+            for file in files:
+                postfix, is_numbered = self._extract_postfix(file, base_name)
+                postfix_groups[postfix][base_name].add(file)
+                unmatched_files.discard(file)
+
+        return postfix_groups, base_names, unmatched_files
 
     def find_companion_files(self, file_path: Path) -> List[Path]:
         """Find companion files for a track.
@@ -467,7 +415,7 @@ class DatasetComponentSchema:
             "version": "1.0",
             "components": {
                 "instrumental": {
-                    "pattern": "*_instrumental.mp3",
+                    "pattern": "*_instrumental*.mp3",
                     "required": True,
                     "multiple": False
                 },
@@ -490,66 +438,79 @@ class DatasetComponentSchema:
         }
     
     def add_component(self, name: str, pattern: str, required: bool = False, multiple: bool = False) -> ValidationResult:
-        """Add a new component to the schema.
+        """Add a component to the schema.
         
         Args:
             name: Component name
-            pattern: File pattern
-            required: Whether component is required
-            multiple: Whether multiple files are allowed
-            
+            pattern: Glob pattern for identifying component files
+            required: Whether this component must exist for all tracks
+            multiple: Whether multiple files of this type are allowed per track
+        
         Returns:
             Validation result
         """
-        result = ValidationResult(is_valid=True, errors=[], warnings=[], stats={
-            "total_files": 0,
-            "matched_files": 0,
-            "unmatched_files": 0,
-            "component_coverage": {}
-        })
-
+        result = ValidationResult(
+            is_valid=True,
+            errors=[],
+            warnings=[],
+            stats={
+                "total_files": 0,
+                "matched_files": 0,
+                "unmatched_files": 0,
+                "component_coverage": {
+                    name: {
+                        "matched": 0,
+                        "unmatched": 0
+                    }
+                },
+                "directory_structure": {
+                    "artists": 0,
+                    "albums": 0,
+                    "cds": 0,
+                    "tracks": 0
+                }
+            }
+        )
+        
         # Validate component name
         if ' ' in name:
-            result.is_valid = False
-            result.errors.append(f"Invalid component name '{name}': component names cannot contain spaces")
+            result.add_error(f"Invalid component name '{name}': component names cannot contain spaces")
             return result
-
+        
         # Check if component already exists
         if name in self.schema["components"]:
-            result.is_valid = False
-            result.errors.append(f"Component {name} already exists")
+            result.add_error(f"Component {name} already exists")
             return result
 
-        # Check for pattern collision with other components
+        # Check for pattern collisions with existing components
         for comp_name, comp_info in self.schema["components"].items():
-            if comp_info["pattern"] == pattern:
-                result.is_valid = False
-                result.errors.append(f"Pattern collision between components: {pattern}")
+            existing_pattern = comp_info["pattern"]
+            # Normalize patterns by removing wildcards for comparison
+            normalized_pattern = pattern.replace('*', '')
+            normalized_existing = existing_pattern.replace('*', '')
+            if normalized_pattern == normalized_existing:
+                result.add_error(
+                    f"Pattern collision detected: Component '{name}' would share pattern '{pattern}' "
+                    f"with existing component '{comp_name}'"
+                )
                 return result
-
-        # Add component
-        self.schema["components"][name] = {
-            "pattern": pattern,
-            "required": required,
-            "multiple": multiple
-        }
         
-        # Initialize component coverage
-        result.stats["component_coverage"][name] = {
-            "matched": 0,
-            "unmatched": 0,
-            "total_tracks": 0,
-            "tracks_with_component": 0
-        }
+        # Add component if validation passed
+        if result.is_valid:
+            self.schema["components"][name] = {
+                "pattern": pattern,
+                "required": required,
+                "multiple": multiple
+            }
         
         return result
-    
+
     def remove_component(self, name: str) -> ValidationResult:
         """Remove a component from the schema.
         
         Args:
             name: Component name
-            
+        
         Returns:
             Validation result
         """
@@ -567,134 +528,111 @@ class DatasetComponentSchema:
         # Validate after removing
         return self.validate()
     
-    def validate_against_data(self, target_path: Optional[Path] = None) -> ValidationResult:
-        """Validate schema against dataset files.
+    def _validate_structure(self, result: ValidationResult) -> None:
+        """Validate the schema structure and check for pattern collisions.
         
         Args:
-            target_path: Optional specific path to validate against. If None, validates against entire dataset.
-        
-        Returns:
-            Validation result
+            result: Validation result to update
         """
-        result = ValidationResult(is_valid=True, errors=[], warnings=[], stats={
-            "total_files": 0,
-            "matched_files": 0,
-            "unmatched_files": 0,
-            "component_coverage": {},
-            "directory_structure": {
-                "artists": 0,
-                "albums": 0,
-                "cds": 0,
-                "tracks": 0
+        # Check for pattern collisions between components
+        seen_patterns = {}  # pattern -> component_name
+        for component_name, config in self.schema["components"].items():
+            pattern = config["pattern"]
+            if pattern in seen_patterns:
+                result.add_error(
+                    f"Pattern collision detected: Components '{component_name}' and "
+                    f"'{seen_patterns[pattern]}' share the same pattern '{pattern}'"
+                )
+            seen_patterns[pattern] = component_name
+
+    def validate_against_data(self, path: Optional[Path] = None) -> ValidationResult:
+        """Validate the schema against the dataset."""
+        result = ValidationResult(
+            is_valid=True,
+            errors=[],
+            warnings=[],
+            stats={
+                "total_files": 0,
+                "matched_files": 0,
+                "unmatched_files": 0,
+                "component_coverage": {},
+                "directory_structure": {
+                    "artists": 0,
+                    "albums": 0,
+                    "cds": 0,
+                    "tracks": 0
+                }
             }
-        })
+        )
         
-        # Initialize component coverage
-        for comp_name in self.schema["components"]:
-            result.stats["component_coverage"][comp_name] = {
+        # First validate the schema structure and check for pattern collisions
+        self._validate_structure(result)
+        if not result.is_valid:
+            return result
+        
+        # If no path provided, use the dataset path
+        validate_path = path if path else self.dataset_path
+        
+        # Initialize component coverage tracking
+        component_coverage = {
+            component: {
                 "matched": 0,
-                "unmatched": 0,
-                "total_tracks": 0,
-                "tracks_with_component": 0
+                "unmatched": 0
             }
+            for component in self.schema["components"]
+        }
         
-        # Group files by track
-        track_files = defaultdict(list)
-        total_files = 0
+        # Track files by base name to check required components and multiple files constraint
+        track_components = defaultdict(lambda: defaultdict(list))  # base_name -> component -> list of files
+        track_files = defaultdict(list)  # base_name -> list of files
         
-        base_path = target_path if target_path else self.dataset_path
-        for root, _, files in os.walk(base_path):
-            try:
-                rel_path = Path(root).relative_to(self.dataset_path)
-            except ValueError:
-                    continue
-                
+        # First pass: collect all files and identify tracks
+        for root, _, files in os.walk(validate_path):
             # Skip .blackbird directory
-            if '.blackbird' in rel_path.parts:
+            if '.blackbird' in Path(root).parts:
                 continue
-            
-            for file_name in files:
-                file_path = rel_path / file_name
-                base_name = Path(file_name).stem
                 
-                # First, try to match the file against component patterns
-                matched_component = None
-                for comp_name, comp_info in self.schema["components"].items():
-                    pattern = comp_info["pattern"]
-                    if fnmatch.fnmatch(file_name, pattern):
-                        matched_component = comp_info
+            for filename in files:
+                if filename.startswith('.'):
+                    continue
+                    
+                file_path = os.path.join(root, filename)
+                base_name = Path(filename).stem.split('_')[0]
+                track_files[base_name].append(filename)
+                result.stats["total_files"] += 1
+                
+                # Try to match file against component patterns
+                matched = False
+                for component, config in self.schema["components"].items():
+                    if fnmatch.fnmatch(filename, config["pattern"]):
+                        matched = True
+                        result.stats["matched_files"] += 1
+                        component_coverage[component]["matched"] += 1
+                        track_components[base_name][component].append(filename)
                         break
-                    else:
-                        # Check for versioned variants
-                        pattern_base = pattern.rsplit(".", 1)[0] if "." in pattern else pattern
-                        pattern_ext = pattern.rsplit(".", 1)[1] if "." in pattern else ""
-                        versioned_pattern = f"{pattern_base}_*{pattern_ext}"
-                        if fnmatch.fnmatch(file_name, versioned_pattern):
-                            matched_component = comp_info
-                            break
                 
-                # If we found a matching component, extract the base track name
-                if matched_component:
-                    pattern = matched_component["pattern"]
-                    pattern_base = pattern.rsplit(".", 1)[0] if "." in pattern else pattern
-                    if pattern_base.startswith("*"):
-                        suffix = pattern_base[1:]
-                        # Remove version suffix if present
-                        if "_v" in base_name:
-                            base_name = base_name[:base_name.rindex("_v")]
-                        # Remove component suffix
-                        if base_name.endswith(suffix):
-                            base_name = base_name[:-len(suffix)]
+                if not matched:
+                    result.stats["unmatched_files"] += 1
+                    result.add_warning(f"Unmatched file: {file_path}")
+        
+        # Second pass: check constraints for all tracks that have any files
+        for base_name, files in track_files.items():
+            # Check for missing required components
+            for component, config in self.schema["components"].items():
+                if config["required"] and component not in track_components[base_name]:
+                    result.add_error(f"Required component '{component}' missing for track '{base_name}'")
+                    result.is_valid = False
                 
-                track_files[str(rel_path / base_name)].append(str(file_path))
-                total_files += 1
+                # Check for multiple files constraint
+                if component in track_components[base_name] and not config["multiple"] and len(track_components[base_name][component]) > 1:
+                    result.add_error(
+                        f"Component '{component}' has multiple files for track '{base_name}' "
+                        f"but multiple files are not allowed: {', '.join(track_components[base_name][component])}"
+                    )
+                    result.is_valid = False
         
-        result.stats["total_files"] = total_files
-        
-        # Update total tracks count
-        for comp_name in self.schema["components"]:
-            result.stats["component_coverage"][comp_name]["total_tracks"] = len(track_files)
-        
-        # Check each track against schema
-        matched_files = set()
-        
-        for track_path, files in track_files.items():
-            for comp_name, comp_spec in self.schema["components"].items():
-                pattern = comp_spec["pattern"]
-                required = comp_spec["required"]
-                multiple = comp_spec["multiple"]
-                
-                # Find all files matching the component pattern
-                matches = []
-                for file_path in files:
-                    file_name = Path(file_path).name
-                    # Check if file matches the pattern or any versioned variant
-                    if fnmatch.fnmatch(file_name, pattern):
-                        matches.append(file_path)
-                    else:
-                        # Check for versioned variants
-                        pattern_base = pattern.rsplit(".", 1)[0] if "." in pattern else pattern
-                        pattern_ext = pattern.rsplit(".", 1)[1] if "." in pattern else ""
-                        versioned_pattern = f"{pattern_base}_v*{pattern_ext}"
-                        if fnmatch.fnmatch(file_name, versioned_pattern):
-                            matches.append(file_path)
-                
-                if matches:
-                    matched_files.update(matches)
-                    result.stats["component_coverage"][comp_name]["matched"] += len(matches)
-                    result.stats["component_coverage"][comp_name]["tracks_with_component"] += 1
-                
-                if required and not matches:
-                    result.add_error(f"Required component '{comp_name}' missing for track {track_path}")
-                elif not multiple and len(matches) > 1:
-                    result.add_error(f"Component '{comp_name}' has multiple files for track {track_path}")
-            
-            # Update unmatched files count for each component
-            for comp_name in self.schema["components"]:
-                result.stats["component_coverage"][comp_name]["unmatched"] = total_files - result.stats["component_coverage"][comp_name]["matched"]
-        
-        result.stats["matched_files"] = len(matched_files)
-        result.stats["unmatched_files"] = total_files - len(matched_files)
+        # Update component coverage statistics
+        result.stats["component_coverage"] = component_coverage
         
         return result
 
@@ -729,29 +667,31 @@ class DatasetComponentSchema:
         return str(base_path)
 
     def _list_tracks(self, dataset_path: str) -> List[str]:
-        """List all tracks in the dataset."""
+        """List all tracks in the dataset by finding instrumental files."""
+        print(f"\nListing tracks in {dataset_path}")
         tracks = set()
         for root, _, files in os.walk(dataset_path):
             try:
                 rel_path = Path(root).relative_to(dataset_path)
             except ValueError:
+                print(f"Skipping root in _list_tracks: {root}")
                 continue
                 
             # Skip .blackbird directory
             if '.blackbird' in rel_path.parts:
+                print(f"Skipping .blackbird directory in _list_tracks: {rel_path}")
                 continue
                 
-            # Group files by base name
-            files_by_base = defaultdict(list)
+            # Look for instrumental files to identify tracks
             for file_name in files:
-                base_name = Path(file_name).stem.split('_')[0]
-                files_by_base[base_name].append(file_name)
+                if '_instrumental.mp3' in file_name:
+                    # Get base name by removing _instrumental.mp3
+                    base_name = file_name.replace('_instrumental.mp3', '')
+                    track_path = str(rel_path / base_name)
+                    print(f"Found track: {track_path}")
+                    tracks.add(track_path)
                 
-            # Add each base name as a track
-            for base_name in files_by_base:
-                track_path = str(rel_path / base_name)
-                tracks.add(track_path)
-                
+        print(f"Total tracks found: {len(tracks)}")
         return sorted(list(tracks))
 
     def _list_track_files(self, track_path: str) -> List[str]:
@@ -762,7 +702,85 @@ class DatasetComponentSchema:
         
         # List all files in the track directory
         for file_name in os.listdir(os.path.join(self.dataset_path, track_dir)):
-            if file_name.startswith(track_base + '_'):
-                track_files.append(os.path.join(track_dir, file_name))
+            # Check if the file belongs to this track
+            if file_name.startswith(track_base):
+                # Check if it matches any component pattern
+                for comp_info in self.schema["components"].values():
+                    pattern = comp_info["pattern"]
+                    if pattern.startswith('*'):
+                        # Convert glob pattern to regex pattern
+                        regex_pattern = f"^{track_base}{pattern[1:]}$"
+                        if re.match(regex_pattern, file_name):
+                            track_files.append(os.path.join(track_dir, file_name))
+                            break
                 
         return sorted(track_files)
+
+    def parse_real_folder_and_report(self, folder_path: Union[str, Path]) -> None:
+        """Parse a real folder using the current schema and display component files.
+        
+        This is a utility function to help understand how files in a folder
+        map to the schema components.
+        
+        Args:
+            folder_path: Path to the folder to analyze
+        """
+        folder_path = Path(folder_path)
+        if not folder_path.exists():
+            print(f"Error: Folder {folder_path} does not exist")
+            return
+            
+        # Group files by component
+        component_files = defaultdict(list)
+        unmatched_files = []
+        
+        # Walk through all files
+        for file_path in folder_path.rglob('*'):
+            if not file_path.is_file() or '.blackbird' in str(file_path):
+                continue
+                
+            # Try to match file against component patterns
+            matched = False
+            for comp_name, comp_info in self.schema["components"].items():
+                pattern = comp_info["pattern"]
+                if pattern.startswith('*'):
+                    # Convert glob pattern to regex for exact matching
+                    regex_pattern = f"^.*{pattern[1:].replace('*', '.*')}$"
+                    if re.match(regex_pattern, file_path.name):
+                        rel_path = file_path.relative_to(folder_path)
+                        component_files[comp_name].append(str(rel_path))
+                        matched = True
+                        break
+                        
+            if not matched:
+                rel_path = file_path.relative_to(folder_path)
+                unmatched_files.append(str(rel_path))
+                
+        # Print report
+        print(f"\nAnalysis of folder: {folder_path}")
+        print("\nFiles by component:")
+        
+        for comp_name, files in sorted(component_files.items()):
+            comp_info = self.schema["components"][comp_name]
+            print(f"\n{comp_name}:")
+            print(f"  Pattern: {comp_info['pattern']}")
+            print(f"  Required: {comp_info['required']}")
+            print(f"  Multiple: {comp_info['multiple']}")
+            print(f"  Files ({len(files)}):")
+            for file in sorted(files):
+                print(f"    {file}")
+                
+        if unmatched_files:
+            print("\nUnmatched files:")
+            for file in sorted(unmatched_files):
+                print(f"  {file}")
+        else:
+            print("\nAll files matched to components.")
+            
+        # Print summary
+        total_files = sum(len(files) for files in component_files.values()) + len(unmatched_files)
+        print(f"\nSummary:")
+        print(f"  Total files: {total_files}")
+        print(f"  Matched to components: {total_files - len(unmatched_files)}")
+        print(f"  Unmatched: {len(unmatched_files)}")
+        print(f"  Components used: {len(component_files)}")

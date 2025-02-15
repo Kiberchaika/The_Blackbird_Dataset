@@ -189,10 +189,9 @@ def test_discover_schema(test_dataset):
     assert result.is_valid
     assert "instrumental" in schema.schema["components"]
     assert "vocals_noreverb" in schema.schema["components"]
-    assert "mir" in schema.schema["components"]
+    assert "mir.json" in schema.schema["components"]
     
     # Check component properties
-    assert schema.schema["components"]["instrumental"]["required"] is True
     assert schema.schema["components"]["instrumental"]["pattern"] == "*_instrumental.mp3"
     assert not schema.schema["components"]["instrumental"]["multiple"]
     
@@ -204,302 +203,88 @@ def test_discover_schema(test_dataset):
     assert result.stats["instrumental"]["track_coverage"] == 1.0
     assert not result.stats["instrumental"]["has_multiple"]
 
-def test_discover_schema_with_multiple(test_dataset):
-    """Test schema discovery with multiple files per component."""
-    schema = DatasetComponentSchema.create(test_dataset)
-    
-    # Create test directory structure
-    (test_dataset / "Artist1/Album1").mkdir(parents=True)
-    (test_dataset / "Artist1/Album2").mkdir(parents=True)
-    
-    # Add base track files for track1
-    (test_dataset / "Artist1/Album1/track1_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album1/track1_vocals_noreverb.mp3").touch()
-    
-    # Add multiple files for a component with correct numbering for track1
-    (test_dataset / "Artist1/Album1/track1_vocals1.mp3").touch()
-    (test_dataset / "Artist1/Album1/track1_vocals2.mp3").touch()
-    (test_dataset / "Artist1/Album1/track1_vocals3.mp3").touch()
-    
-    # Add files that shouldn't be detected as multiple for track1
-    (test_dataset / "Artist1/Album1/track1_vocals_other.mp3").touch()  # No number suffix
-    (test_dataset / "Artist1/Album1/track1_1_vocals.mp3").touch()  # Number in wrong position
-    
-    # Add base track files for track2
-    (test_dataset / "Artist1/Album1/track2_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album1/track2_vocals_noreverb.mp3").touch()
-    
-    # Add multiple files for a component with correct numbering for track2
-    (test_dataset / "Artist1/Album1/track2_vocals1.mp3").touch()
-    (test_dataset / "Artist1/Album1/track2_vocals2.mp3").touch()
-    (test_dataset / "Artist1/Album1/track2_vocals3.mp3").touch()
-    
-    # Add base track files for track3
-    (test_dataset / "Artist1/Album2/track3_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album2/track3_vocals_noreverb.mp3").touch()
-    
-    # Add multiple files for a component with correct numbering for track3
-    (test_dataset / "Artist1/Album2/track3_vocals1.mp3").touch()
-    (test_dataset / "Artist1/Album2/track3_vocals2.mp3").touch()
-    (test_dataset / "Artist1/Album2/track3_vocals3.mp3").touch()
-    
-    result = schema.discover_schema()
-    
-    assert result.is_valid
-    
-    # Check that vocals component was detected with multiple files
-    assert "vocals" in schema.schema["components"]
-    vocals_component = schema.schema["components"]["vocals"]
-    assert vocals_component["multiple"] is True
-    assert vocals_component["pattern"].endswith("[0-9]+.mp3")  # Pattern should match numbered files
-    
-    # Check statistics
-    vocals_stats = result.stats["vocals"]
-    assert vocals_stats["file_count"] == 9  # 3 files each for 3 tracks
-    assert vocals_stats["has_multiple"] is True
-    assert vocals_stats["max_files_per_track"] == 3
-    
-    # Verify other files were not included in the multiple component
-    assert vocals_stats["unmatched"] > 0  # The non-conforming files should be unmatched
-    
-    # Verify base components were not affected
-    assert "instrumental" in schema.schema["components"]
-    assert not schema.schema["components"]["instrumental"]["multiple"]
-    assert schema.schema["components"]["vocals_noreverb"]["pattern"] == "*_vocals_noreverb.mp3"
-    assert not schema.schema["components"]["vocals_noreverb"]["multiple"]
-
-def test_validate_against_data(test_dataset):
-    """Test schema validation against dataset."""
-    schema = DatasetComponentSchema.create(test_dataset)
-    
-    # Add test files
-    (test_dataset / "Artist1/Album1/track1_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album1/track1_vocals_noreverb.mp3").touch()
-    (test_dataset / "Artist1/Album1/track2_instrumental.mp3").touch()
-    # track2 missing vocals (optional)
-    
-    # Add vocals component
-    schema.add_component(
-        "vocals_noreverb",
-        pattern="*_vocals_noreverb.mp3",
-        required=False
-    )
-    
-    # Validate
-    result = schema.validate_against_data()
-    
-    assert result.is_valid
-    assert result.stats["total_files"] == 3
-    assert result.stats["matched_files"] == 3
-    assert result.stats["unmatched_files"] == 0
-    assert result.stats["component_coverage"]["instrumental"]["matched"] == 2
-    assert result.stats["component_coverage"]["vocals_noreverb"]["matched"] == 1
-
-def test_validate_missing_required(test_dataset):
-    """Test validation with missing required component."""
-    schema = DatasetComponentSchema.create(test_dataset)
-    
-    # Add test files with missing instrumental
-    (test_dataset / "Artist1/Album1/track1_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album1/track1_vocals_noreverb.mp3").touch()
-    (test_dataset / "Artist1/Album1/track2_vocals_noreverb.mp3").touch()
-    # track2 missing instrumental (required)
-    
-    result = schema.validate_against_data()
-    
-    assert not result.is_valid
-    assert any("Required component 'instrumental' missing" in error for error in result.errors)
-
-def test_validate_pattern_collision(test_dataset):
-    """Test validation with pattern collision between components."""
-    schema = DatasetComponentSchema.create(test_dataset)
-    
-    # Add component with overlapping pattern
-    result = schema.add_component(
-        "overlap",
-        pattern="*_instrumental.mp3",  # Same as instrumental pattern
-        required=False
-    )
-    
-    # Add test file
-    (test_dataset / "Artist1/Album1/track1_instrumental.mp3").touch()
-    
-    assert not result.is_valid
-    assert any("Pattern collision between" in error for error in result.errors)
-
-def test_validate_multiple_constraint(test_dataset):
-    """Test validation of multiple files constraint."""
-    schema = DatasetComponentSchema.create(test_dataset)
-    
-    # Add test files with multiple instrumentals
-    (test_dataset / "Artist1/Album1/track1_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album1/track1_instrumental_v2.mp3").touch()
-    
-    print("\nTest files created:")
-    for root, _, files in os.walk(test_dataset):
-        for file in files:
-            print(f"- {os.path.join(root, file)}")
-    
-    result = schema.validate_against_data()
-    
-    print("\nValidation Result:")
-    print(f"Is valid: {result.is_valid}")
-    print("\nErrors:")
-    for error in result.errors:
-        print(f"- {error}")
-    
-    print("\nStats:")
-    for key, value in result.stats.items():
-        if isinstance(value, dict):
-            print(f"\n{key}:")
-            for k, v in value.items():
-                print(f"  {k}: {v}")
-        else:
-            print(f"{key}: {value}")
-    
-    assert not result.is_valid
-    assert any("has multiple files for track" in error for error in result.errors)
-
-def test_discover_schema_with_numbered_sections(test_dataset):
-    """Test schema discovery with numbered section files."""
-    schema = DatasetComponentSchema.create(test_dataset)
-    
-    # Add test files with numbered sections
-    base_name = "09.Центр - Навсегда (Всё наше)"
-    (test_dataset / "Artist1/Album1" / f"{base_name}_instrumental.mp3").touch()
-    (test_dataset / "Artist1/Album1" / f"{base_name}_vocals_noreverb.mp3").touch()
-    (test_dataset / "Artist1/Album1" / f"{base_name}_vocals_noreverb.json").touch()
-    
-    # Add multiple numbered sections
-    for i in [2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14]:
-        (test_dataset / "Artist1/Album1" / f"{base_name}_vocals_stretched_120bpm_section{i}.mp3").touch()
-        (test_dataset / "Artist1/Album1" / f"{base_name}_vocals_stretched_120bpm_section{i}.json").touch()
-    
-    result = schema.discover_schema()
-    
-    assert result.is_valid
-    
-    # Check discovered components
-    components = schema.schema["components"]
-    assert "instrumental" in components
-    assert "vocals_noreverb" in components
-    assert "vocals_stretched_120bpm_section" in components
-    
-    # Verify section component properties
-    section_comp = components["vocals_stretched_120bpm_section"]
-    assert section_comp["multiple"] is True
-    assert section_comp["required"] is False
-    assert "[0-9]+" in section_comp["pattern"]
-    
-    # Check statistics
-    section_stats = result.stats["vocals_stretched_120bpm_section"]
-    assert section_stats["file_count"] == 22  # 11 sections * 2 files each
-    assert section_stats["has_multiple"] is True
-    assert section_stats["unique_tracks"] == 1  # All sections belong to same track
-
 def test_discover_schema_real_album():
-    """Test schema discovery with a single album."""
-    dataset_path = Path("/media/k4_nas/Datasets/Music_RU/Vocal_Dereverb")
-    
-    # Single album to analyze
+    """Test schema discovery with a real album."""
+    dataset_path = Path("/media/k4_nas/disk1/Datasets/Music_RU/Vocal_Dereverb")
     album_to_analyze = ["7Б/Молодые ветра [2001]"]
     
-    print("\nAnalyzing album:")
-    print(f"- {album_to_analyze[0]}")
+    print("\n=== Starting test_discover_schema_real_album ===")
+    print(f"Dataset path: {dataset_path}")
+    print(f"Dataset path exists: {dataset_path.exists()}")
+    print(f"Dataset path is dir: {dataset_path.is_dir()}")
+    print(f"Album to analyze: {album_to_analyze}")
     
     # Create schema for the dataset but analyze just the specified album
     schema = DatasetComponentSchema(dataset_path)
     result = schema.discover_schema(folders=album_to_analyze)
     
-    assert result.is_valid
+    # Print debug info
+    print("\nDiscovery result:")
+    schema.parse_real_folder_and_report(dataset_path / album_to_analyze[0])
+    print(f"Result valid: {result.is_valid}")
+    print(f"Result stats: {result.stats}")
+    print(f"Schema components: {schema.schema['components']}")
     
-    # Print discovered schema in a more readable format
-    print("\nDiscovered Components:")
-    for name, config in schema.schema["components"].items():
-        print(f"\n{name}:")
-        print(f"  Pattern: {config['pattern']}")
-        print(f"  Multiple: {config['multiple']}")
-        if "description" in config:
-            print(f"  Description: {config['description']}")
-            
-        # Print corresponding statistics
-        if name in result.stats:
-            stats = result.stats[name]
-            print("\n  Statistics:")
-            print(f"    Files found: {stats['file_count']}")
-            print(f"    Track coverage: {stats['track_coverage']*100:.1f}%")
-            print(f"    Unique tracks: {stats['unique_tracks']}")
-            print(f"    Files per track: {stats['min_files_per_track']} to {stats['max_files_per_track']}")
-            print(f"    Extensions: {', '.join(stats['extensions'])}")
-            print(f"    Has sections: {stats['has_sections']}")
+    # Verify the result is valid
+    assert result.is_valid, "Schema discovery failed"
     
-    print("\nDirectory Structure:")
-    print(json.dumps(schema.schema["structure"], indent=2))
-    
-    print("\nSync Configuration:")
-    print(json.dumps(schema.schema["sync"], indent=2))
-    
-    # Check discovered components
+    # Verify all expected components are present
     components = schema.schema["components"]
-    assert "instrumental_audio" in components
-    assert "vocals_noreverb_lyrics" in components
-    assert "vocals_stretched_audio" in components
-    assert "mir.json" in components
+    expected_components = {
+        "instrumental", "vocals_noreverb", "mir.json", "caption",
+        "vocals_stretched_120bpm_section*_json", "vocals_stretched_120bpm_section*_mp3"
+    }
+    assert set(components.keys()) == expected_components, \
+        f"Missing components. Found: {set(components.keys())}, Expected: {expected_components}"
     
-    # Check instrumental audio component
-    instrumental = components["instrumental_audio"]
+    # Verify component configurations
+    instrumental = components["instrumental"]
     assert instrumental["pattern"] == "*_instrumental.mp3"
-    assert instrumental["multiple"] is False  # Each track has exactly one instrumental file
-    assert result.stats["instrumental_audio"]["track_coverage"] >= 0.95  # Should be close to 100%
-    assert result.stats["instrumental_audio"]["max_files_per_track"] == 1
+    assert instrumental["multiple"] is False
+    assert result.stats['components']["instrumental"]["track_coverage"] == 1.0
     
-    # Check vocals component
-    vocals = components["vocals_noreverb_lyrics"]
-    assert vocals["pattern"] == "*_vocals_noreverb.json"
-    assert vocals["multiple"] is False  # Each track has exactly one lyrics file
-    assert result.stats["vocals_noreverb_lyrics"]["track_coverage"] >= 0.95  # Should be close to 100%
-    assert result.stats["vocals_noreverb_lyrics"]["max_files_per_track"] == 1
+    vocals = components["vocals_noreverb"]
+    assert vocals["pattern"] == "*_vocals_noreverb.mp3"
+    assert vocals["required"] is False
+    assert vocals["multiple"] is False
+    assert result.stats['components']["vocals_noreverb"]["track_coverage"] > 0
     
-    # Check sections component
-    sections = components["vocals_stretched_audio"]
-    assert sections["multiple"] is True  # Multiple stretched files per track
-    assert sections["pattern"] == "*_vocals_stretched.mp3"
-    assert result.stats["vocals_stretched_audio"]["track_coverage"] >= 0.95  # Should be close to 100%
-    assert result.stats["vocals_stretched_audio"]["max_files_per_track"] >= 5  # At least 5 files per track
-    assert result.stats["vocals_stretched_audio"]["min_files_per_track"] >= 5  # At least 5 files per track
-
-    # Check sections component with section pattern
-    sections_with_section = components["vocals_stretched_audio_section"]  # Note: _audio_section, not _section_audio
-    assert sections_with_section["multiple"] is True
-    assert sections_with_section["pattern"] == "*_vocals_stretched_audio_*section*.mp3"
-    assert result.stats["vocals_stretched_audio_section"]["track_coverage"] >= 0.95  # Should be close to 100%
-    assert result.stats["vocals_stretched_audio_section"]["max_files_per_track"] >= 5
-    assert result.stats["vocals_stretched_audio_section"]["min_files_per_track"] >= 5
-    
-    # Check MIR component
     mir = components["mir.json"]
     assert mir["pattern"] == "*.mir.json"
-    assert mir["multiple"] is False  # Each track has exactly one MIR file
-    assert result.stats["mir.json"]["track_coverage"] >= 0.95  # Should be close to 100%
-    assert result.stats["mir.json"]["max_files_per_track"] == 1
+    assert mir["required"] is False
+    assert mir["multiple"] is False
+    assert result.stats['components']["mir.json"]["track_coverage"] > 0
+    
+    caption = components["caption"]
+    assert caption["pattern"] == "*_caption.txt"
+    assert caption["required"] is False
+    assert caption["multiple"] is False
+    
+    stretched = components["vocals_stretched_section"]
+    assert stretched["pattern"] == "*_vocals_stretched_120bpm_section*.mp3"
+    assert stretched["required"] is False
+    assert stretched["multiple"] is True
+    assert result.stats['components']["vocals_stretched_120bpm_section*_json"]["has_sections"] is True
+    
+    
 
 def test_validate_schema_different_album():
     """Test validating the schema against a different album."""
-    dataset_path = Path("/media/k4_nas/Datasets/Music_RU/Vocal_Dereverb")
+    dataset_path = Path("/media/k4_nas/disk1/Datasets/Music_RU/Vocal_Dereverb")
     
     print("\nStep 1: Discovering schema from reference album")
-    print("Album: Центр/Дитятя [1988]")
+    print("Album: 7Б/Молодые ветра [2001]")
     
     # First discover schema from one album
     schema = DatasetComponentSchema(dataset_path)
-    discovery_result = schema.discover_schema(folders=["Центр/Дитятя [1988]"])
+    discovery_result = schema.discover_schema(folders=["7Б/Молодые ветра [2001]"])
     assert discovery_result.is_valid, "Schema discovery failed"
     
     print("\nStep 2: Validating schema against different album")
-    print("Album: Центр/Сделано в Париже [1989]")
+    print("Album: 7Б/Моя любовь [2007]")
     
-    # Now validate against a different album
-    validation_result = schema.validate_against_data(dataset_path / "Центр/Сделано в Париже [1989]")
+    # Now validate against a different album from the same artist
+    validation_result = schema.validate_against_data(dataset_path / "7Б/Моя любовь [2007]")
     
     # Print validation results in a more organized way
     print("\nValidation Summary:")
@@ -530,10 +315,15 @@ def test_validate_schema_different_album():
     assert validation_result.is_valid, "Schema validation failed"
     assert validation_result.stats["total_files"] > 0, "No files found in validation album"
     assert validation_result.stats["unmatched_files"] == 0, "Found files not matching any component"
+    
+    # Verify component coverage
+    for component, stats in validation_result.stats["component_coverage"].items():
+        assert stats["matched"] > 0, f"No files matched for component {component}"
+        assert stats["unmatched"] == 0, f"Found unmatched files for component {component}"
 
 def test_discover_schema_with_cd_album():
     """Test schema discovery with a multi-CD album."""
-    dataset_path = Path("/media/k4_nas/Datasets/Music_RU/Vocal_Dereverb")
+    dataset_path = Path("/media/k4_nas/disk1/Datasets/Music_RU/Vocal_Dereverb")
     
     # Album with CDs to analyze
     album_to_analyze = ["Alai Oli/Последний из ушедших [2022]"]

@@ -416,13 +416,13 @@ class DatasetComponentSchema:
             "components": {
                 "instrumental": {
                     "pattern": "*_instrumental*.mp3",
-                    "required": True,
-                    "multiple": False
+                    "multiple": False,
+                    "description": "Base instrumental track"
                 },
                 "mir": {
                     "pattern": "*.mir.json",
-                    "required": False,
-                    "multiple": False
+                    "multiple": False,
+                    "description": "Music Information Retrieval data"
                 }
             },
             "structure": {
@@ -524,7 +524,7 @@ class DatasetComponentSchema:
             for component in self.schema["components"]
         }
         
-        # Track files by base name to check required components and multiple files constraint
+        # Track files by base name to check multiple files constraint
         track_components = defaultdict(lambda: defaultdict(list))  # base_name -> component -> list of files
         track_files = defaultdict(list)  # base_name -> list of files
         
@@ -559,13 +559,8 @@ class DatasetComponentSchema:
         
         # Second pass: check constraints for all tracks that have any files
         for base_name, files in track_files.items():
-            # Check for missing required components
+            # Check for multiple files constraint
             for component, config in self.schema["components"].items():
-                if config["required"] and component not in track_components[base_name]:
-                    result.add_error(f"Required component '{component}' missing for track '{base_name}'")
-                    result.is_valid = False
-                
-                # Check for multiple files constraint
                 if component in track_components[base_name] and not config["multiple"] and len(track_components[base_name][component]) > 1:
                     result.add_error(
                         f"Component '{component}' has multiple files for track '{base_name}' "

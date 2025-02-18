@@ -55,6 +55,12 @@ def test_search_by_artist(sample_index):
     # Test case-insensitive search
     assert sorted(sample_index.search_by_artist("artist")) == ["Artist1", "Artist2"]
     assert sample_index.search_by_artist("nonexistent") == []
+    
+    # Test fuzzy search
+    fuzzy_matches = sample_index.search_by_artist("Artst1", fuzzy_search=True)
+    assert "Artist1" in fuzzy_matches  # The queried artist should be in the results
+    assert len(fuzzy_matches) >= 1  # Should return at least one match
+    assert all(isinstance(match, str) for match in fuzzy_matches)  # All matches should be strings
 
 def test_search_by_album(sample_index):
     # Test without artist filter

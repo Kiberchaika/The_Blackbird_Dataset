@@ -530,19 +530,19 @@ blackbird --help
 ### 1. Dataset Cloning
 ```bash
 # Clone entire dataset
-blackbird clone webdav://192.168.1.100/dataset /path/to/local
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local
 
 # Clone specific components
-blackbird clone webdav://192.168.1.100/dataset /path/to/local \
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --components vocals,mir
 
 # Clone subset of artists (supports glob patterns)
-blackbird clone webdav://192.168.1.100/dataset /path/to/local \
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --artists "Artist1,Art*" \
     --components vocals
 
 # Clone proportion of dataset
-blackbird clone webdav://192.168.1.100/dataset /path/to/local \
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --proportion 0.1 \
     --offset 0
 ```
@@ -554,6 +554,9 @@ blackbird stats /path/to/dataset
 
 # Find incomplete tracks
 blackbird find-tracks /path/to/dataset --missing vocals
+
+# Rebuild dataset index
+blackbird reindex /path/to/dataset
 ```
 
 ### 3. Schema Management
@@ -717,7 +720,465 @@ def cli():
 @click.option('--proportion', type=float, help='Proportion of dataset to sync (0-1)')
 @click.option('--offset', type=int, help='Offset for partial sync')
 def clone(url, destination, components, artists, proportion, offset):
-    """Clone dataset from WebDAV URL"""
+    """Clone dataset from remote source.
+    
+    URL: Remote dataset WebDAV URL (e.g. webdav://192.168.1.100:8080)
+    DESTINATION: Local path for the cloned dataset
+    
+    The clone process follows these steps:
+    1. Download and validate remote schema
+    2. Download dataset index
+    3. Validate requested components and artists
+    4. Start file transfer
+    """
+    components = components.split(',') if components else None
+    artists = artists.split(',') if artists else None
+    
+    dataset = Dataset(destination)
+    client = dataset.configure_client(url)
+    
+    dataset.sync_from_remote(
+        client,
+        components=components,
+        artists=artists,
+        proportion=proportion,
+        offset=offset
+    )
+
+@cli.command()
+@click.argument('path')
+def setup_server(path):
+    """Setup WebDAV server for dataset"""
+    wizard = ServerSetupWizard(path)
+    wizard.run()
+```
+
+Test coverage needed:
+1. CLI command testing
+2. WebDAV server setup testing
+3. Server configuration validation
+4. Connection testing
+5. Security testing 
+
+## Dataset Indexing
+
+Blackbird maintains a lightweight, fast index of the dataset for efficient operations. The index is stored in `.blackbird/index.pickle` using Python's pickle format with protocol 5 for optimal performance.
+
+### Index Structure
+
+```python
+@dataclass
+class TrackInfo:
+    """Track information in the index."""
+    track_path: str      # Relative path identifying the track (artist/album/[cd]/track)
+    artist: str         # Artist name
+    album_path: str     # Full path to album (artist/album)
+    cd_number: Optional[str]  # CD number if present
+    base_name: str      # Track name without component suffixes
+    files: Dict[str, str]  # component_name -> file_path mapping
+    file_sizes: Dict[str, int]  # file_path -> size in bytes
+
+@dataclass
+class DatasetIndex:
+    """Main index structure."""
+    last_updated: datetime
+    tracks: Dict[str, TrackInfo]  # track_path -> TrackInfo
+    track_by_album: Dict[str, Set[str]]  # album_path -> set of track_paths
+    album_by_artist: Dict[str, Set[str]]  # artist_name -> set of album_paths
+    total_size: int  # Total size of all indexed files
+    version: str = "1.0"
+```
+
+The index provides efficient access to:
+1. Track information by path
+2. All tracks in an album
+3. All albums by an artist
+4. File sizes for verification during sync
+5. Component files for each track
+
+### Search Capabilities
+
+The index supports several search operations:
+
+1. **Artist Search**
+   ```python
+   # Case-insensitive search by default
+   artists = index.search_by_artist("artist")
+   
+   # Case-sensitive search
+   artists = index.search_by_artist("Artist1", case_sensitive=True)
+   ```
+
+2. **Album Search**
+   ```python
+   # Search all albums
+   albums = index.search_by_album("Album")
+   
+   # Search albums by specific artist
+   albums = index.search_by_album("Album", artist="Artist1")
+   ```
+
+3. **Track Search**
+   ```python
+   # Search all tracks
+   tracks = index.search_by_track("Track")
+   
+   # Search with filters
+   tracks = index.search_by_track("Track", 
+                                artist="Artist1", 
+                                album="Artist1/Album1")
+   ```
+
+### Index Building
+
+The index is built by scanning the dataset and grouping files by their components:
+
+1. **Directory Scanning**
+   - Uses `os.walk` for efficient directory traversal
+   - Shows real-time progress with tqdm
+   - Counts files and calculates total size
+
+2. **Component Grouping**
+   - Groups files by their component patterns
+   - Creates lookup tables for efficient access
+   - Handles CD-based album structures
+
+3. **Track Organization**
+   - Groups related files by base name
+   - Creates track paths for unique identification
+   - Maintains file size information
+
+Example index building:
+```python
+# Build index with progress tracking
+index = build_index(dataset_path, schema)
+
+# Save index
+index.save(index_path)
+```
+
+### Synchronization with Index
+
+The sync process uses the index for efficient file transfer:
+
+1. **Component Selection**
+   ```python
+   sync = DatasetSync(local_path)
+   stats = sync.sync(
+       client,
+       components=["vocals", "mir"],
+       artists=["Artist1"],
+       resume=True
+   )
+   ```
+
+2. **File Discovery**
+   - Uses index instead of scanning remote server
+   - Knows exact files and sizes upfront
+   - Can calculate total size before starting
+
+3. **Progress Tracking**
+   ```python
+   @dataclass
+   class SyncStats:
+       total_files: int = 0
+       synced_files: int = 0
+       failed_files: int = 0
+       skipped_files: int = 0
+       total_size: int = 0
+       synced_size: int = 0
+   ```
+
+4. **Resume Support**
+   - Verifies existing files by size
+   - Skips correctly synced files
+   - Tracks sync progress
+
+5. **Error Handling**
+   - Validates file sizes after download
+   - Removes failed downloads
+   - Provides detailed error reporting
+
+Example sync output:
+```
+Collecting files to sync...
+Found 1000 files to sync (50.5 GB)
+Syncing files: 100% |████████| 1000/1000 [02:30<00:00, 6.67 files/s]
+
+Sync completed!
+Total files: 1000
+Successfully synced: 950
+Failed: 10
+Skipped: 40
+Total size: 50.5 GB
+Synced size: 48.2 GB
+```
+
+### Remote Dataset Initialization
+
+When connecting to a remote dataset, Blackbird follows a strict initialization sequence:
+
+1. **Schema Download**
+   ```
+   Downloading schema from remote...
+   Schema downloaded successfully.
+   Available components:
+   - instrumental (*.instrumental.mp3)
+   - vocals_noreverb (*.vocals_noreverb.mp3)
+   - mir (*.mir.json)
+   ...
+   ```
+
+2. **Index Download**
+   ```
+   Downloading dataset index...
+   Index downloaded successfully.
+   Total tracks: 1000
+   Total artists: 50
+   ```
+
+3. **Component Validation**
+   - Before starting any sync/clone operation, validate requested components
+   - If invalid components are requested, show available ones
+   - Suggest similar component names using fuzzy matching
+   ```
+   Error: Unknown component 'vocal'
+   Available components:
+   - vocals_noreverb
+   - vocals_stretched
+   Did you mean 'vocals_noreverb'?
+   ```
+
+4. **Artist Validation**
+   - Validate requested artists against the index
+   - Show suggestions for similar artist names
+   ```
+   Error: Unknown artist 'Zemfira'
+   Did you mean 'Земфира'?
+   ```
+
+This validation sequence ensures:
+1. Users are aware of available components before sync starts
+2. Typos in component or artist names are caught early
+3. Helpful suggestions guide users to correct names
+4. No unnecessary network traffic for invalid requests
+
+## Command Line Interface
+
+Blackbird provides a comprehensive CLI for dataset operations after pip installation:
+
+```bash
+# Install package
+pip install blackbird-dataset
+
+# Basic usage
+blackbird --help
+```
+
+### 1. Dataset Cloning
+```bash
+# Clone entire dataset
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local
+
+# Clone specific components
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
+    --components vocals,mir
+
+# Clone subset of artists (supports glob patterns)
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
+    --artists "Artist1,Art*" \
+    --components vocals
+
+# Clone proportion of dataset
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
+    --proportion 0.1 \
+    --offset 0
+```
+
+### 2. Dataset Analysis
+```bash
+# Show dataset statistics
+blackbird stats /path/to/dataset
+
+# Find incomplete tracks
+blackbird find-tracks /path/to/dataset --missing vocals
+
+# Rebuild dataset index
+blackbird reindex /path/to/dataset
+```
+
+### 3. Schema Management
+```bash
+# Show current schema
+blackbird schema show /path/to/dataset
+
+# Add new component
+blackbird schema add /path/to/dataset \
+    --name lyrics \
+    --pattern "*.lyrics.json"
+```
+
+## WebDAV Server Setup
+
+Blackbird includes a wizard for setting up a WebDAV server on Ubuntu using nginx:
+
+```bash
+# Start WebDAV setup wizard
+blackbird setup-server /path/to/dataset
+```
+
+### Setup Process
+
+1. **Dependency Check**
+   ```bash
+   Checking system requirements...
+   Installing nginx and nginx-dav-ext-module...
+   ```
+
+2. **Nginx Configuration**
+   ```bash
+   Configuring nginx WebDAV module...
+   Setting up authentication...
+   Configuring dataset directory...
+   ```
+
+3. **Security Setup**
+   ```bash
+   Creating user credentials...
+   Setting directory permissions...
+   Configuring SSL (optional)...
+   ```
+
+4. **Testing**
+   ```bash
+   Starting nginx service...
+   Testing WebDAV connection...
+   Verifying file access...
+   ```
+
+### Server Configuration
+
+The wizard creates a secure WebDAV configuration:
+
+```nginx
+# /etc/nginx/sites-available/blackbird-webdav.conf
+server {
+    listen 80;
+    server_name _;  # Replace with your domain if needed
+
+    # SSL configuration (optional)
+    # listen 443 ssl;
+    # ssl_certificate /etc/nginx/ssl/server.crt;
+    # ssl_certificate_key /etc/nginx/ssl/server.key;
+
+    root /path/to/dataset;
+    
+    location / {
+        # WebDAV configuration
+        dav_methods PUT DELETE MKCOL COPY MOVE;
+        dav_ext_methods PROPFIND OPTIONS;
+        
+        # Read-only access (no PUT, DELETE, etc.)
+        limit_except GET PROPFIND OPTIONS {
+            deny all;
+        }
+        
+        # Basic authentication
+        auth_basic "Blackbird Dataset";
+        auth_basic_user_file /etc/nginx/webdav.passwords;
+        
+        # Directory listing
+        autoindex on;
+        
+        # Client body size (adjust as needed)
+        client_max_body_size 0;
+        
+        # WebDAV performance tuning
+        create_full_put_path on;
+        dav_access user:rw group:r all:r;
+    }
+    
+    # Access and error logs
+    access_log /var/log/nginx/webdav.access.log;
+    error_log /var/log/nginx/webdav.error.log;
+}
+```
+
+### Security Features
+
+1. **Authentication**
+   - Basic auth with secure password storage
+   - Optional SSL/TLS encryption
+   - IP-based access control
+
+2. **Permissions**
+   - Read-only access by default
+   - Separate user for WebDAV service
+   - Proper file ownership
+
+3. **Monitoring**
+   - Access logging
+   - Error logging
+   - Bandwidth monitoring
+
+### Testing
+
+The wizard performs automatic testing:
+
+1. **Connection Test**
+   ```python
+   # Verify WebDAV access
+   client = blackbird.configure_client("webdav://localhost")
+   assert client.check_connection()
+   ```
+
+2. **File Access Test**
+   ```python
+   # Verify file listing
+   files = client.list()
+   assert len(files) > 0
+   
+   # Verify file download
+   test_file = files[0]
+   assert client.download_sync(test_file, "test.tmp")
+   ```
+
+3. **Performance Test**
+   ```python
+   # Test download speed
+   speed = client.test_download_speed()
+   print(f"Download speed: {speed} MB/s")
+   ```
+
+### CLI Implementation
+
+The CLI is implemented using Click:
+
+```python
+@click.group()
+def cli():
+    """Blackbird Dataset Manager CLI"""
+    pass
+
+@cli.command()
+@click.argument('url')
+@click.argument('destination')
+@click.option('--components', help='Comma-separated list of components')
+@click.option('--artists', help='Comma-separated list of artists (glob patterns supported)')
+@click.option('--proportion', type=float, help='Proportion of dataset to sync (0-1)')
+@click.option('--offset', type=int, help='Offset for partial sync')
+def clone(url, destination, components, artists, proportion, offset):
+    """Clone dataset from remote source.
+    
+    URL: Remote dataset WebDAV URL (e.g. webdav://192.168.1.100:8080)
+    DESTINATION: Local path for the cloned dataset
+    
+    The clone process follows these steps:
+    1. Download and validate remote schema
+    2. Download dataset index
+    3. Validate requested components and artists
+    4. Start file transfer
+    """
     components = components.split(',') if components else None
     artists = artists.split(',') if artists else None
     

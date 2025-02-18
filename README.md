@@ -1,6 +1,6 @@
 # Blackbird Dataset Manager
 
-A Python package for managing, synchronizing, and analyzing music datasets with multiple components.
+A tool for managing music datasets with multiple components, supporting efficient synchronization and component management.
 
 ## Features
 
@@ -12,9 +12,61 @@ A Python package for managing, synchronizing, and analyzing music datasets with 
 
 ## Installation
 
+There are two ways to install the Blackbird Dataset Manager:
+
+### 1. Using pip (recommended)
+
 ```bash
-pip install blackbird-dataset
+# Install from the repository root
+pip install -e .
 ```
+
+### 2. Using requirements.txt
+
+```bash
+# Install dependencies first
+pip install -r requirements.txt
+
+# Then install the package
+pip install -e .
+```
+
+## Usage
+
+After installation, you can use the `blackbird` command-line tool:
+
+```bash
+# Show help
+blackbird --help
+
+# Clone a dataset
+blackbird clone webdav://server/dataset /path/to/local --components vocals,instrumental
+
+# Show dataset statistics
+blackbird stats /path/to/dataset
+
+# Find tracks
+blackbird find-tracks /path/to/dataset --missing vocals
+
+# Show schema
+blackbird schema show /path/to/dataset
+
+# Add new component
+blackbird schema add /path/to/dataset component_name "*_pattern.mp3"
+
+# Rebuild index
+blackbird reindex /path/to/dataset
+```
+
+## Development
+
+For development, install additional dependencies:
+
+```bash
+pip install -e ".[dev]"
+```
+
+This will install development tools like pytest, black, and mypy.
 
 ## Quick Start
 
@@ -64,20 +116,6 @@ dataset_root/
 │           ├── track1_instrumental.mp3
 │           └── ...
 └── ...
-```
-
-## Development
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/blackbird-dataset.git
-cd blackbird-dataset
-
-# Install development dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
 ```
 
 ## License

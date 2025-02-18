@@ -9,6 +9,7 @@ import time
 import os
 from tqdm import tqdm
 import re
+from difflib import get_close_matches
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +64,44 @@ class DatasetIndex:
         with open(path, 'rb') as f:
             return pickle.load(f)
 
-    def search_by_artist(self, query: str, case_sensitive: bool = False) -> List[str]:
+    def search_by_artist(self, query: str, case_sensitive: bool = False, fuzzy_search: bool = False) -> List[str]:
         """Search for artists matching the query.
-        Returns a list of artist names that contain the query string."""
-        if not case_sensitive:
-            query = query.lower()
-            return [artist for artist in self.album_by_artist.keys() 
-                   if query in artist.lower()]
-        return [artist for artist in self.album_by_artist.keys() 
-               if query in artist]
+        
+        Args:
+            query: Artist name query
+            case_sensitive: Whether to perform case-sensitive matching
+            fuzzy_search: Whether to use fuzzy matching for similar names when no exact matches are found
+            
+        Returns:
+            List of artist names that contain the query string or are similar to it
+        """
+        # First try exact/substring matching
+        if case_sensitive:
+            matches = [artist for artist in self.album_by_artist.keys() 
+                      if query in artist]
+        else:
+            query_lower = query.lower()
+            matches = [artist for artist in self.album_by_artist.keys() 
+                      if query_lower in artist.lower()]
+        
+        # If no matches found and fuzzy search is enabled, try fuzzy matching
+        if not matches and fuzzy_search:
+            artists = list(self.album_by_artist.keys())
+            
+            if not case_sensitive:
+                # For case-insensitive search, convert query to lowercase
+                query_lower = query.lower()
+                # Create a mapping of lowercase to original names
+                case_map = {artist.lower(): artist for artist in artists}
+                # Get close matches using lowercase versions
+                fuzzy_matches = get_close_matches(query_lower, list(case_map.keys()), n=5, cutoff=0.6)
+                # Map back to original artist names
+                matches = [case_map[match] for match in fuzzy_matches]
+            else:
+                # For case-sensitive search, use original strings
+                matches = get_close_matches(query, artists, n=5, cutoff=0.6)
+        
+        return matches
 
     def search_by_album(self, album_query: str, artist: Optional[str] = None) -> List[str]:
         """Search for albums by name.

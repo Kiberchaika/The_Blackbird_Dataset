@@ -221,8 +221,8 @@ class DatasetComponentSchema:
             # Add component to schema
             self.schema["components"][component_name] = {
                 "pattern": pattern,
-                "required": False,  # Never set required by default
-                "multiple": is_multiple
+                "multiple": is_multiple,
+                "description": ""  # Empty description by default
             }
 
             # Calculate track coverage
@@ -437,113 +437,55 @@ class DatasetComponentSchema:
             }
         }
     
-    def add_component(self, name: str, pattern: str, required: bool = False, multiple: bool = False) -> ValidationResult:
-        """Add a component to the schema.
+    def add_component(self, name: str, pattern: str, multiple: bool = False) -> ValidationResult:
+        """Add a new component to the schema.
         
         Args:
-            name: Component name
-            pattern: Glob pattern for identifying component files
-            required: Whether this component must exist for all tracks
+            name: Component name/identifier
+            pattern: Glob pattern for matching files
             multiple: Whether multiple files of this type are allowed per track
-        
+            
         Returns:
-            Validation result
+            ValidationResult with validation status and any errors/warnings
         """
-        result = ValidationResult(
-            is_valid=True,
-            errors=[],
-            warnings=[],
-            stats={
-                "total_files": 0,
-                "matched_files": 0,
-                "unmatched_files": 0,
-                "component_coverage": {
-                    name: {
-                        "matched": 0,
-                        "unmatched": 0
-                    }
-                },
-                "directory_structure": {
-                    "artists": 0,
-                    "albums": 0,
-                    "cds": 0,
-                    "tracks": 0
-                }
-            }
-        )
+        # Validate pattern
+        if not pattern:
+            return ValidationResult(
+                is_valid=False,
+                errors=["Pattern cannot be empty"],
+                warnings=[],
+                stats={}
+            )
         
-        # Validate component name
-        if ' ' in name:
-            result.add_error(f"Invalid component name '{name}': component names cannot contain spaces")
-            return result
+        # Add component
+        self.schema["components"][name] = {
+            "pattern": pattern,
+            "multiple": multiple,
+            "description": ""  # Empty description by default
+        }
         
-        # Check if component already exists
-        if name in self.schema["components"]:
-            result.add_error(f"Component {name} already exists")
-            return result
-
-        # Check for pattern collisions with existing components
-        for comp_name, comp_info in self.schema["components"].items():
-            existing_pattern = comp_info["pattern"]
-            # Normalize patterns by removing wildcards for comparison
-            normalized_pattern = pattern.replace('*', '')
-            normalized_existing = existing_pattern.replace('*', '')
-            if normalized_pattern == normalized_existing:
-                result.add_error(
-                    f"Pattern collision detected: Component '{name}' would share pattern '{pattern}' "
-                    f"with existing component '{comp_name}'"
-                )
-                return result
-        
-        # Add component if validation passed
-        if result.is_valid:
-            self.schema["components"][name] = {
-                "pattern": pattern,
-                "required": required,
-                "multiple": multiple
-            }
-        
-        return result
+        return self.validate()
 
     def remove_component(self, name: str) -> ValidationResult:
         """Remove a component from the schema.
         
         Args:
-            name: Component name
-        
+            name: Name of component to remove
+            
         Returns:
-            Validation result
+            ValidationResult with validation status and any errors/warnings
         """
-        # Check if component exists
         if name not in self.schema["components"]:
-            return ValidationResult(is_valid=False, errors=[f"Component {name} does not exist"], warnings=[], stats={})
-
-        # Check if component is required
-        if self.schema["components"][name]["required"]:
-            return ValidationResult(is_valid=False, errors=[f"Cannot remove required component {name}"], warnings=[], stats={})
-
-        # Remove component
+            return ValidationResult(
+                is_valid=False,
+                errors=[f"Component {name} not found in schema"],
+                warnings=[],
+                stats={}
+            )
+        
+        # Remove the component
         del self.schema["components"][name]
-        
-        # Validate after removing
         return self.validate()
-    
-    def _validate_structure(self, result: ValidationResult) -> None:
-        """Validate the schema structure and check for pattern collisions.
-        
-        Args:
-            result: Validation result to update
-        """
-        # Check for pattern collisions between components
-        seen_patterns = {}  # pattern -> component_name
-        for component_name, config in self.schema["components"].items():
-            pattern = config["pattern"]
-            if pattern in seen_patterns:
-                result.add_error(
-                    f"Pattern collision detected: Components '{component_name}' and "
-                    f"'{seen_patterns[pattern]}' share the same pattern '{pattern}'"
-                )
-            seen_patterns[pattern] = component_name
 
     def validate_against_data(self, path: Optional[Path] = None) -> ValidationResult:
         """Validate the schema against the dataset."""
@@ -764,7 +706,6 @@ class DatasetComponentSchema:
             comp_info = self.schema["components"][comp_name]
             print(f"\n{comp_name}:")
             print(f"  Pattern: {comp_info['pattern']}")
-            print(f"  Required: {comp_info['required']}")
             print(f"  Multiple: {comp_info['multiple']}")
             print(f"  Files ({len(files)}):")
             for file in sorted(files):
@@ -784,3 +725,20 @@ class DatasetComponentSchema:
         print(f"  Matched to components: {total_files - len(unmatched_files)}")
         print(f"  Unmatched: {len(unmatched_files)}")
         print(f"  Components used: {len(component_files)}")
+
+    def _validate_structure(self, result: ValidationResult) -> None:
+        """Validate the schema structure and check for pattern collisions.
+        
+        Args:
+            result: Validation result to update
+        """
+        # Check for pattern collisions between components
+        seen_patterns = {}  # pattern -> component_name
+        for component_name, config in self.schema["components"].items():
+            pattern = config["pattern"]
+            if pattern in seen_patterns:
+                result.add_error(
+                    f"Pattern collision detected: Components '{component_name}' and "
+                    f"'{seen_patterns[pattern]}' share the same pattern '{pattern}'"
+                )
+            seen_patterns[pattern] = component_name

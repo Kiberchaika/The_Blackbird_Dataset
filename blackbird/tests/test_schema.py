@@ -391,3 +391,31 @@ def test_discover_schema_with_cd_album():
     assert schema.schema["structure"]["artist_album_format"]["is_cd_optional"] is True
     assert schema.schema["structure"]["artist_album_format"]["cd_pattern"] == "CD\\d+"
     assert "?cd" in schema.schema["structure"]["artist_album_format"]["levels"]  # CD level is optional, so it's marked with ?
+
+def test_add_component(tmp_path):
+    """Test adding a new component to the schema."""
+    schema = DatasetComponentSchema(tmp_path)
+    
+    # Add instrumental component
+    result = schema.add_component(
+        "instrumental",
+        "*_instrumental.mp3",
+        multiple=False
+    )
+    assert result.is_valid
+    assert "instrumental" in schema.schema["components"]
+    assert schema.schema["components"]["instrumental"]["pattern"] == "*_instrumental.mp3"
+    assert schema.schema["components"]["instrumental"]["multiple"] is False
+
+def test_remove_component(tmp_path):
+    """Test removing a component from the schema."""
+    schema = DatasetComponentSchema(tmp_path)
+    
+    # Add component first
+    schema.add_component("vocals", "*_vocals.mp3", multiple=False)
+    assert "vocals" in schema.schema["components"]
+    
+    # Remove it
+    result = schema.remove_component("vocals")
+    assert result.is_valid
+    assert "vocals" not in schema.schema["components"]

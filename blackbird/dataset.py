@@ -1,15 +1,20 @@
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Callable
 from .schema import DatasetComponentSchema, ValidationResult
-from collections import defaultdict
+from .index import DatasetIndex, TrackInfo
 import logging
-import fnmatch
+from collections import defaultdict
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 class Dataset:
-    """Main class for dataset operations and management."""
+    """Main interface for dataset operations and management.
+    
+    This class serves as the primary interface for all dataset operations.
+    It internally manages both the schema (component definitions) and index
+    (efficient file lookup) to provide a unified interface for dataset operations.
+    """
     
     def __init__(self, path: Path):
         """Initialize dataset with path.
@@ -18,15 +23,27 @@ class Dataset:
             path: Path to dataset root directory
         """
         self.path = Path(path)
-        self.schema = DatasetComponentSchema(self.path)
+        self._schema = DatasetComponentSchema(self.path)
+        self._index = self._load_or_build_index()
+        
+    def _load_or_build_index(self) -> DatasetIndex:
+        """Load existing index or build a new one if not found."""
+        index_path = self.path / ".blackbird" / "index.pickle"
+        if index_path.exists():
+            return DatasetIndex.load(index_path)
+        return self._rebuild_index()
+        
+    def _rebuild_index(self) -> DatasetIndex:
+        """Build a fresh index of the dataset."""
+        logger.info(f"Rebuilding index for dataset at {self.path}")
+        logger.info(f"Schema components: {list(self._schema.schema['components'].keys())}")
+        index = DatasetIndex.build(self.path, self._schema)
+        logger.info(f"Built index with {len(index.tracks)} tracks")
+        return index
         
     def validate(self) -> ValidationResult:
-        """Validate entire dataset against schema.
-        
-        Returns:
-            Validation result with statistics
-        """
-        return self.schema.validate()
+        """Validate entire dataset against schema."""
+        return self._schema.validate()
         
     def find_tracks(
         self,
@@ -37,6 +54,9 @@ class Dataset:
         progress_callback: Optional[Callable[[str], None]] = None
     ) -> Dict[str, List[Path]]:
         """Find tracks based on component presence and metadata.
+        
+        This method uses the index for efficient lookups. First time usage on a 
+        dataset will trigger index building.
         
         Args:
             has: List of components that must be present
@@ -51,67 +71,38 @@ class Dataset:
         has = has or []
         missing = missing or []
         
-        # Validate component names
+        # Validate component names against schema
         all_components = set(has) | set(missing)
-        invalid_components = all_components - set(self.schema.schema["components"].keys())
+        invalid_components = all_components - set(self._schema.schema["components"].keys())
         if invalid_components:
             raise ValueError(f"Invalid components: {invalid_components}")
             
-        # Find all instrumental tracks as base set
         if progress_callback:
-            progress_callback("Finding instrumental tracks...")
-        base_tracks = list(self.path.rglob("*_instrumental.mp3"))
-        track_groups = defaultdict(list)
-        
-        # Group tracks by their relative path
-        if progress_callback:
-            progress_callback(f"Processing {len(base_tracks)} tracks...")
-        for track in tqdm(base_tracks, desc="Grouping tracks", disable=progress_callback is None):
-            track_id = self.schema.get_track_relative_path(track)
-            track_groups[track_id].append(track)
+            progress_callback("Searching tracks in index...")
             
-            # Add companion files
-            companions = self.schema.find_companion_files(track)
-            track_groups[track_id].extend([f for f in companions if f != track])
+        # Use index to find matching tracks
+        matching_tracks: Dict[str, List[Path]] = {}
         
-        # Filter by artist/album if specified
-        if artist or album:
-            if progress_callback:
-                progress_callback("Applying artist/album filters...")
-            filtered_groups = defaultdict(list)
-            for track_id, files in track_groups.items():
-                track_path = Path(track_id)
-                parts = track_path.parts
-                
-                if artist and parts[0] != artist:
-                    continue
-                if album and parts[1] != album:
-                    continue
-                    
-                filtered_groups[track_id].extend(files)
-            track_groups = filtered_groups
+        # First filter by artist/album if specified
+        tracks_to_check = self._index.search_by_track("", artist=artist, album=album)
+        
+        for track_info in tracks_to_check:
+            # Get component names present for this track
+            track_components = set(track_info.files.keys())
             
-        # Check component presence
-        if progress_callback:
-            progress_callback("Checking component presence...")
-        result_tracks = defaultdict(list)
-        for track_id, files in track_groups.items():
-            # Check which components are present
-            has_components = set()
-            for component, config in self.schema.schema["components"].items():
-                pattern = config["pattern"]
-                if any(fnmatch.fnmatch(str(f.name), pattern) for f in files):
-                    has_components.add(component)
-                    
-            # Apply filters
-            if all(c in has_components for c in has) and \
-               all(c not in has_components for c in missing):
-                result_tracks[track_id].extend(files)
+            # Check component presence requirements
+            if all(c in track_components for c in has) and \
+               all(c not in track_components for c in missing):
+                # Convert relative paths to absolute Path objects
+                matching_tracks[track_info.track_path] = [
+                    self.path / file_path
+                    for file_path in track_info.files.values()
+                ]
                 
-        return dict(result_tracks)
+        return matching_tracks
         
     def analyze(self, progress_callback: Optional[Callable[[str], None]] = None) -> Dict:
-        """Analyze dataset and return statistics.
+        """Analyze dataset and return statistics using the index.
         
         Args:
             progress_callback: Optional callback for progress updates
@@ -119,59 +110,49 @@ class Dataset:
         Returns:
             Dictionary with various statistics about the dataset
         """
+        if progress_callback:
+            progress_callback("Analyzing dataset from index...")
+            
         stats = {
-            "total_size": 0,
-            "artists": set(),
-            "albums": defaultdict(set),
+            "total_size": self._index.total_size,
+            "artists": set(self._index.album_by_artist.keys()),
+            "albums": {
+                artist: {Path(album_path).name for album_path in albums}
+                for artist, albums in self._index.album_by_artist.items()
+            },
             "components": defaultdict(int),
             "tracks": {
-                "total": 0,
+                "total": len(self._index.tracks),
                 "complete": 0,
                 "by_artist": defaultdict(int)
             }
         }
         
-        # Find all tracks
-        if progress_callback:
-            progress_callback("Finding and grouping all tracks...")
-        all_tracks = self.find_tracks(progress_callback=progress_callback)
-        stats["tracks"]["total"] = len(all_tracks)
-        
-        if progress_callback:
-            progress_callback(f"Analyzing {len(all_tracks)} tracks...")
-        
-        for track_id, files in tqdm(all_tracks.items(), desc="Analyzing tracks", disable=progress_callback is None):
-            # Update size
-            stats["total_size"] += sum(f.stat().st_size for f in files)
-            
-            # Update artist/album info
-            track_path = Path(track_id)
-            parts = track_path.parts
-            artist = parts[0]
-            album = parts[1]
-            stats["artists"].add(artist)
-            stats["albums"][artist].add(album)
-            stats["tracks"]["by_artist"][artist] += 1
-            
+        # Analyze component presence and track completeness
+        for track_info in self._index.tracks.values():
             # Count components
-            has_components = set()
-            for component, config in self.schema.schema["components"].items():
-                pattern = config["pattern"]
-                if any(fnmatch.fnmatch(str(f.name), pattern) for f in files):
-                    has_components.add(component)
-                    stats["components"][component] += 1
-                    
+            for component in track_info.files:
+                stats["components"][component] += 1
+                
+            # Update artist stats
+            stats["tracks"]["by_artist"][track_info.artist] += 1
+            
             # Check if track has all components
-            if has_components == set(self.schema.schema["components"].keys()):
+            if set(track_info.files.keys()) == set(self._schema.schema["components"].keys()):
                 stats["tracks"]["complete"] += 1
                 
-        # Convert sets to lists for JSON serialization
-        if progress_callback:
-            progress_callback("Finalizing statistics...")
-        stats["artists"] = sorted(stats["artists"])
-        stats["albums"] = {
-            artist: sorted(albums) 
-            for artist, albums in stats["albums"].items()
-        }
-        
         return stats
+        
+    def rebuild_index(self) -> None:
+        """Force rebuild of the dataset index."""
+        self._index = self._rebuild_index()
+        
+    @property
+    def schema(self) -> DatasetComponentSchema:
+        """Get the dataset schema (read-only)."""
+        return self._schema
+        
+    @property 
+    def index(self) -> DatasetIndex:
+        """Get the dataset index (read-only)."""
+        return self._index

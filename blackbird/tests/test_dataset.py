@@ -13,13 +13,17 @@ def test_dataset(tmp_path):
     # Create schema first
     schema = DatasetComponentSchema.create(dataset_root)
     schema.schema["components"].update({
+        "instrumental": {
+            "pattern": "*_instrumental.mp3",
+            "multiple": False
+        },
         "vocals": {
             "pattern": "*_vocals_noreverb.mp3",
-            "required": False
+            "multiple": False
         },
-        "mir.json": {
+        "mir": {
             "pattern": "*.mir.json",
-            "required": False
+            "multiple": False
         }
     })
     schema.save()
@@ -55,10 +59,19 @@ def test_dataset(tmp_path):
     shutil.rmtree(dataset_root)
 
 def test_dataset_initialization(test_dataset):
-    """Test dataset initialization."""
+    """Test dataset initialization and index building."""
     dataset = Dataset(test_dataset)
-    assert dataset.path == test_dataset
+    
+    # Verify schema loaded
     assert dataset.schema is not None
+    assert "vocals" in dataset.schema.schema["components"]
+    assert "mir" in dataset.schema.schema["components"]
+    
+    # Verify index built
+    assert dataset.index is not None
+    assert len(dataset.index.tracks) == 4  # Total number of tracks
+    assert len(dataset.index.album_by_artist) == 2  # Two artists
+    assert dataset.index.total_size >= 0  # Size should be calculated
 
 def test_find_tracks_all(test_dataset):
     """Test finding all tracks."""
@@ -76,7 +89,7 @@ def test_find_tracks_all(test_dataset):
         "Artist2/Album1/CD1/track1",
         "Artist2/Album1/CD2/track1"
     }
-    assert {str(Path(p)) for p in track_paths} == expected_paths
+    assert track_paths == expected_paths
 
 def test_find_tracks_with_components(test_dataset):
     """Test finding tracks with specific components."""
@@ -87,10 +100,10 @@ def test_find_tracks_with_components(test_dataset):
     assert len(tracks_with_vocals) == 2
     
     # Find tracks with both vocals and mir
-    complete_tracks = dataset.find_tracks(has=["vocals", "mir.json"])
+    complete_tracks = dataset.find_tracks(has=["vocals", "mir"])
     assert len(complete_tracks) == 1
     track_path = next(iter(complete_tracks.keys()))
-    assert str(Path(track_path)) == "Artist1/Album1/track1"
+    assert track_path == "Artist1/Album1/track1"
 
 def test_find_tracks_missing_components(test_dataset):
     """Test finding tracks missing components."""
@@ -101,7 +114,7 @@ def test_find_tracks_missing_components(test_dataset):
     assert len(tracks_no_vocals) == 2  # track2 and CD2/track1
     
     # Verify specific tracks
-    track_paths = {str(Path(p)) for p in tracks_no_vocals.keys()}
+    track_paths = set(tracks_no_vocals.keys())
     expected_paths = {
         "Artist1/Album1/track2",
         "Artist2/Album1/CD2/track1"
@@ -121,7 +134,7 @@ def test_find_tracks_by_artist(test_dataset):
     assert len(artist2_tracks) == 2
     
     # Verify CD tracks
-    track_paths = {str(Path(p)) for p in artist2_tracks.keys()}
+    track_paths = set(artist2_tracks.keys())
     expected_paths = {
         "Artist2/Album1/CD1/track1",
         "Artist2/Album1/CD2/track1"
@@ -137,7 +150,7 @@ def test_analyze_dataset(test_dataset):
     assert len(stats["artists"]) == 2
     assert stats["components"]["instrumental"] == 4  # All tracks have instrumental
     assert stats["components"]["vocals"] == 2  # Two tracks have vocals
-    assert stats["components"]["mir.json"] == 2  # Two tracks have MIR
+    assert stats["components"]["mir"] == 2  # Two tracks have MIR
     
     # Check artist-specific stats
     assert stats["tracks"]["by_artist"]["Artist1"] == 2
@@ -145,4 +158,19 @@ def test_analyze_dataset(test_dataset):
     
     # Check album structure
     assert "Album1" in stats["albums"]["Artist1"]
-    assert "Album1" in stats["albums"]["Artist2"] 
+    assert "Album1" in stats["albums"]["Artist2"]
+
+def test_rebuild_index(test_dataset):
+    """Test manual index rebuilding."""
+    dataset = Dataset(test_dataset)
+    initial_index = dataset.index
+    
+    # Add a new file
+    (test_dataset / "Artist1" / "Album1" / "track3_instrumental.mp3").touch()
+    
+    # Rebuild index
+    dataset.rebuild_index()
+    
+    # Verify index was updated
+    assert len(dataset.index.tracks) == len(initial_index.tracks) + 1
+    assert "Artist1/Album1/track3" in dataset.index.tracks 

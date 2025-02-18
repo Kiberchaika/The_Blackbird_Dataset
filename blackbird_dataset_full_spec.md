@@ -40,9 +40,8 @@ The directory structure is fixed and non-configurable:
 The schema system defines ONLY the types of files (components) that can exist for each track. It does NOT define the directory structure, which is fixed. The schema specifies:
 1. What component types exist (e.g., instrumentals, vocals, MIR data)
 2. The naming pattern for each component type (including file extensions)
-3. Whether components are required or optional
-4. Whether multiple files of a component are allowed per track
-5. Human-readable descriptions of each component's purpose
+3. Whether multiple files of a component are allowed per track
+4. Human-readable descriptions of each component's purpose
 
 When syncing from a remote source, only the components that were specifically requested for sync are pulled from the remote schema. This ensures that:
 1. The local schema only contains components that are actually being used
@@ -92,7 +91,6 @@ for name, config in schema.schema["components"].items():
 
 2. **Component Definitions**
    - `pattern`: Glob pattern for identifying component files (includes exact file extension)
-   - `required`: Whether this component must exist for all tracks
    - `multiple`: Whether multiple files of this type are allowed per track
    - `description`: Human-readable description of the component's purpose
 
@@ -181,15 +179,11 @@ The schema validation process ensures:
    - No pattern collisions between components
    - File extensions are part of uniqueness check
 
-2. **Required Components**
-   - All required components must be present for each track
-   - Missing required components trigger validation errors
-
-3. **Multiple Files Constraint**
+2. **Multiple Files Constraint**
    - Components with `multiple: false` must have exactly one file per track
    - Section-based components automatically get `multiple: true`
 
-4. **Directory Structure**
+3. **Directory Structure**
    - Validates against fixed artist/album/[cd]/track structure
    - Ensures CD directories match pattern when present
    - Verifies maximum directory depth
@@ -361,15 +355,7 @@ Each component serves a specific purpose:
   ```
 - Test coverage: `test_add_component` verifies pattern matching
 
-#### 2. Required Flag (`required`)
-- Indicates if component must exist for all tracks
-- Used for dataset validation
-- Examples:
-  - `instrumental`: `required=true` (base tracks must exist)
-  - `vocals`: `required=false` (some tracks may not have vocals)
-- Test coverage: `test_validate_structure` checks required components
-
-#### 3. Multiple Files Flag (`multiple`)
+#### 2. Multiple Files Flag (`multiple`)
 - Allows multiple files per track for this component
 - Examples:
   - `sections`: `multiple=true` (multiple cut sections per track)

@@ -83,6 +83,7 @@ The schema discovery process automatically analyzes the dataset structure to gen
    - A special case of component is a multiple file component that has a number right before the file extension.
    E.g. `track1_vocals_stretched_120bpm_section1.mp3` has the component pattern `vocals_stretched_120bpm_section*.mp3`
    - Component name/id can be descriptive, but the component pattern is used to find the actual files
+   - The default Component name is the component pattern with the file extension, but shortened if it's especially long
 
 
 Example discovery usage:

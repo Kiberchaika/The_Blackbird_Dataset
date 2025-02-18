@@ -3,9 +3,10 @@ from pathlib import Path
 from typing import List, Optional
 from .dataset import Dataset
 from .schema import DatasetComponentSchema
-from .sync import clone_dataset, SyncStats
+from .sync import clone_dataset, SyncStats, configure_client
 import json
 import sys
+import tempfile
 
 @click.group()
 def cli():
@@ -43,21 +44,15 @@ def clone(source: str, destination: str, components: Optional[str], artists: Opt
         if proportion:
             click.echo(f"Proportion: {proportion} (offset: {offset})")
             
-        # Create progress bar
-        with click.progressbar(length=100, label='Cloning dataset') as bar:
-            def update_progress(progress: float):
-                bar.update(progress * 100 - bar.pos)
-            
-            # Clone dataset
-            stats = clone_dataset(
-                source_url=source,
-                destination=Path(destination),
-                components=component_list,
-                artists=artist_list,
-                proportion=proportion,
-                offset=offset,
-                progress_callback=update_progress
-            )
+        # Clone dataset
+        stats = clone_dataset(
+            source_url=source,
+            destination=Path(destination),
+            components=component_list,
+            artists=artist_list,
+            proportion=proportion,
+            offset=offset
+        )
         
         # Print summary
         click.echo("\nClone completed!")
@@ -80,6 +75,8 @@ def stats(dataset_path: str):
     """
     try:
         dataset = Dataset(Path(dataset_path))
+        # Force rebuild index to ensure we have current data
+        dataset.rebuild_index()
         stats_result = dataset.analyze()
         
         click.echo("\nDataset Statistics:")
@@ -89,9 +86,9 @@ def stats(dataset_path: str):
         for component, count in stats_result['components'].items():
             click.echo(f"- {component}: {count} files")
         click.echo("\nArtists:")
-        for artist in stats_result['artists']:
+        for artist in sorted(stats_result['artists']):
             click.echo(f"- {artist}")
-            for album in stats_result['albums'][artist]:
+            for album in sorted(stats_result['albums'][artist]):
                 click.echo(f"  - {album}")
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)
@@ -140,16 +137,44 @@ def schema():
     pass
 
 @schema.command()
-@click.argument('dataset_path', type=click.Path(exists=True))
+@click.argument('dataset_path')
 def show(dataset_path: str):
     """Show current schema.
     
-    DATASET_PATH: Path to the dataset
+    DATASET_PATH: Path to the dataset or WebDAV URL
     """
     try:
-        schema = DatasetComponentSchema(Path(dataset_path))
-        click.echo("\nCurrent Schema:")
-        click.echo(json.dumps(schema.schema, indent=2))
+        # Check if it's a WebDAV URL
+        if dataset_path.startswith(('http://', 'https://', 'webdav://')):
+            # Create a fixed temporary directory for downloading schema
+            temp_dir = '/tmp/blackbird_schema_temp'
+            temp_path = Path(temp_dir)
+            temp_path.mkdir(parents=True, exist_ok=True)
+            
+            # Configure WebDAV client
+            client = configure_client(dataset_path)
+            
+            # Download schema
+            click.echo("Downloading schema from remote...")
+            schema_path = temp_path / '.blackbird' / 'schema.json'
+            schema_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            if not client.download_file('.blackbird/schema.json', schema_path):
+                raise ValueError("Failed to download schema from remote")
+            
+            # Load and show schema
+            schema = DatasetComponentSchema(temp_path)
+            click.echo("\nRemote Schema:")
+            click.echo(json.dumps(schema.schema, indent=2))
+            click.echo(f"\nSchema downloaded to: {temp_dir}")
+        else:
+            # Local path handling
+            if not Path(dataset_path).exists():
+                raise ValueError(f"Path '{dataset_path}' does not exist")
+                
+            schema = DatasetComponentSchema(Path(dataset_path))
+            click.echo("\nLocal Schema:")
+            click.echo(json.dumps(schema.schema, indent=2))
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)

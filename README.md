@@ -1,6 +1,6 @@
 # Blackbird Dataset Manager
 
-A tool for managing music datasets with multiple components, supporting efficient synchronization and component management.
+This is a tool to manage, synchronize and otherwise work with the Blackbird music dataset.
 
 ## Features
 

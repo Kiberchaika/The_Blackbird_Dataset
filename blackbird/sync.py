@@ -62,8 +62,9 @@ class WebDAVClient:
         # Configure client options
         options = {
             'webdav_hostname': f"http://{host}",
-            'webdav_root': parsed.path,
-            'webdav_timeout': 30
+            'webdav_root': parsed.path or '/',
+            'webdav_timeout': 30,
+            'disable_check': True  # Add this to prevent initial check
         }
         
         if username and password:
@@ -71,6 +72,7 @@ class WebDAVClient:
             options['webdav_password'] = password
             
         self.client = webdav.Client(options)
+        logger.info(f"WebDAV client configured with options: {options}")
         
     def list_files(self, path: str = '') -> List[Dict[str, str]]:
         """List files in remote directory.
@@ -82,15 +84,20 @@ class WebDAVClient:
             List of file info dictionaries with 'path' and 'size' keys
         """
         try:
-            files = self.client.list(path, get_info=True)
-            return [
+            logger.info(f"Listing files in path: {path}")
+            files = self.client.list(path or '/', get_info=True)
+            logger.info(f"Raw WebDAV response: {files[:5]}")  # Log first 5 entries
+            
+            result = [
                 {
-                    'path': f['path'],
+                    'path': f['path'].lstrip('/'),  # Remove leading slash
                     'size': int(f.get('size', 0))
                 }
                 for f in files
                 if not f['path'].endswith('/')  # Skip directories
             ]
+            logger.info(f"Processed {len(result)} files")
+            return result
         except Exception as e:
             logger.error(f"Failed to list files in {path}: {e}")
             raise
@@ -276,20 +283,7 @@ def clone_dataset(
     offset: int = 0,
     progress_callback = None
 ) -> SyncStats:
-    """Clone dataset from remote source.
-    
-    Args:
-        source_url: Remote dataset URL
-        destination: Local destination path
-        components: Optional list of components to clone
-        artists: Optional list of artists to clone
-        proportion: Optional proportion of dataset to clone (0-1)
-        offset: Offset for proportion-based cloning
-        progress_callback: Optional callback for progress updates
-        
-    Returns:
-        Sync statistics
-    """
+    """Clone dataset from remote source."""
     # Initialize client and stats
     client = WebDAVClient(source_url)
     stats = SyncStats()
@@ -300,15 +294,41 @@ def clone_dataset(
         schema_path = destination / '.blackbird' / 'schema.json'
         schema_path.parent.mkdir(parents=True, exist_ok=True)
         
-        if not client.download_file('.blackbird/schema.json', schema_path):
+        # Create a temporary path for the remote schema
+        temp_schema_path = destination / '.blackbird' / 'remote_schema.json'
+        if not client.download_file('.blackbird/schema.json', temp_schema_path):
             raise ValueError("Failed to download schema from remote")
             
-        # Load schema and show available components
-        schema = DatasetComponentSchema(destination)
-        logger.info("\nAvailable components:")
-        for comp_name, comp_info in schema.schema['components'].items():
-            logger.info(f"- {comp_name} ({comp_info['pattern']})")
+        # Load remote schema
+        remote_schema = DatasetComponentSchema.load(temp_schema_path)
+        
+        # Create or load local schema
+        if schema_path.exists():
+            local_schema = DatasetComponentSchema.load(schema_path)
+        else:
+            # Create a new schema with empty components
+            local_schema = DatasetComponentSchema.create(destination)
+            local_schema.schema['components'] = {}  # Start with empty components
+        
+        # Validate requested components against remote schema
+        if components:
+            invalid_components = set(components) - set(remote_schema.schema['components'].keys())
+            if invalid_components:
+                raise ValueError(f"Invalid components: {invalid_components}")
+                
+            # Update local schema with only the requested components from remote
+            for component in components:
+                local_schema.schema['components'][component] = remote_schema.schema['components'][component]
+        else:
+            # If no specific components requested, copy all components from remote
+            local_schema.schema['components'] = remote_schema.schema['components'].copy()
             
+        # Save the updated local schema
+        local_schema.save()
+        
+        # Clean up temporary schema file
+        temp_schema_path.unlink()
+        
         # Download index
         logger.info("\nDownloading dataset index...")
         index_path = destination / '.blackbird' / 'index.pickle'
@@ -321,106 +341,46 @@ def clone_dataset(
         logger.info(f"Total tracks: {len(index.tracks)}")
         logger.info(f"Total artists: {len(index.album_by_artist)}")
         
-        # Validate components if specified
-        if components:
-            invalid_components = []
-            for component in components:
-                if component not in schema.schema['components']:
-                    invalid_components.append(component)
-                    # Find similar component names
-                    similar = get_close_matches(component, schema.schema['components'].keys(), n=1)
-                    if similar:
-                        click.secho(f"Error: Unknown component '{component}'. Did you mean '{similar[0]}'?", fg="red")
-                    else:
-                        click.secho(f"Error: Unknown component '{component}'. No similar components found.", fg="red")
-                        
-            if invalid_components:
-                click.secho("\nAvailable components:", fg="yellow")
-                for comp_name, comp_info in schema.schema['components'].items():
-                    click.echo(f"- {comp_name} ({comp_info['pattern']})")
-                raise ValueError(f"Invalid components: {', '.join(invalid_components)}")
+        # Get list of artists to process
+        target_artists = artists if artists else list(index.album_by_artist.keys())
+        logger.info(f"Processing artists: {target_artists}")
+        
+        # Find all files to download based on index
+        all_files = []  # List of (file_path, file_size) tuples
+        stats.total_files = 0
+        stats.total_size = 0
+        
+        # Process each artist
+        for artist in target_artists:
+            if artist not in index.album_by_artist:
+                logger.warning(f"Artist not found in index: {artist}")
+                continue
                 
-        # Validate artists if specified
-        if artists:
-            invalid_artists = []
-            for artist in artists:
-                # First try exact match
-                exact_matches = index.search_by_artist(artist, case_sensitive=True)
-                if exact_matches:
-                    continue
+            # Get all tracks for this artist
+            for album_path in index.album_by_artist[artist]:
+                for track_path in index.track_by_album[album_path]:
+                    track = index.tracks[track_path]
                     
-                # Then try case-insensitive match
-                case_insensitive_matches = index.search_by_artist(artist, case_sensitive=False)
-                if case_insensitive_matches:
-                    click.secho(f"Warning: Using case-insensitive match for artist '{artist}': {case_insensitive_matches[0]}", fg="yellow")
-                    continue
-                    
-                # Finally try fuzzy search
-                fuzzy_matches = index.search_by_artist(artist, fuzzy_search=True)
-                if fuzzy_matches:
-                    click.secho(f"Error: Unknown artist '{artist}'. Did you mean '{fuzzy_matches[0]}'?", fg="red")
-                else:
-                    click.secho(f"Error: Unknown artist '{artist}'. No similar artists found.", fg="red")
-                invalid_artists.append(artist)
-                
-            if invalid_artists:
-                click.secho("\nAvailable artists:", fg="yellow")
-                for artist in sorted(index.album_by_artist.keys())[:10]:  # Show first 10 artists
-                    click.echo(f"- {artist}")
-                if len(index.album_by_artist) > 10:
-                    click.echo("... and more")
-                raise ValueError(f"Invalid artists: {', '.join(invalid_artists)}")
-        
-        # List all files
-        logger.info("\nListing remote files...")
-        all_files = client.list_files()
-        
-        # Filter files based on components
-        if components:
-            valid_patterns = []
-            for component in components:
-                pattern = schema.schema['components'][component]['pattern']
-                valid_patterns.append(pattern)
-                    
-            filtered_files = []
-            for file_info in all_files:
-                if any(fnmatch.fnmatch(file_info['path'], pattern) for pattern in valid_patterns):
-                    filtered_files.append(file_info)
-            all_files = filtered_files
-            
-        # Filter by artists if specified
-        if artists:
-            artist_patterns = [f"{artist}/*" for artist in artists]
-            filtered_files = []
-            for file_info in all_files:
-                if any(fnmatch.fnmatch(file_info['path'], pattern) for pattern in artist_patterns):
-                    filtered_files.append(file_info)
-            all_files = filtered_files
-            
-        # Apply proportion and offset if specified
-        if proportion is not None:
-            start_idx = int(len(all_files) * offset)
-            end_idx = int(len(all_files) * (offset + proportion))
-            all_files = all_files[start_idx:end_idx]
-            
-        # Calculate total size
-        stats.total_files = len(all_files)
-        stats.total_size = sum(f['size'] for f in all_files)
-        
-        logger.info(f"\nStarting download:")
-        logger.info(f"Files to download: {stats.total_files}")
-        logger.info(f"Total size: {stats.total_size / (1024*1024*1024):.2f} GB")
+                    # Check each requested component
+                    target_components = components if components else local_schema.schema['components'].keys()
+                    for component in target_components:
+                        if component in track.files:
+                            file_path = track.files[component]
+                            file_size = track.file_sizes[file_path]
+                            all_files.append((file_path, file_size))
+                            stats.total_files += 1
+                            stats.total_size += file_size
         
         # Download files with progress bar
         with tqdm(total=stats.total_size, unit='B', unit_scale=True) as pbar:
-            for file_info in all_files:
-                remote_path = file_info['path']
-                local_path = destination / remote_path
+            for file_path, file_size in all_files:
+                local_path = destination / file_path
+                local_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                if client.download_file(remote_path, local_path):
+                if client.download_file(file_path, local_path):
                     stats.downloaded_files += 1
-                    stats.downloaded_size += file_info['size']
-                    pbar.update(file_info['size'])
+                    stats.downloaded_size += file_size
+                    pbar.update(file_size)
                 else:
                     stats.failed_files += 1
                     
@@ -431,4 +391,15 @@ def clone_dataset(
         
     except Exception as e:
         logger.error(f"Clone failed: {e}")
-        raise 
+        raise
+
+def configure_client(url: str) -> 'WebDAVClient':
+    """Configure WebDAV client for remote dataset access.
+    
+    Args:
+        url: WebDAV server URL (e.g. http://localhost:8080)
+        
+    Returns:
+        Configured WebDAV client
+    """
+    return WebDAVClient(url) 

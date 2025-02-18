@@ -413,18 +413,7 @@ class DatasetComponentSchema:
         """Create default schema."""
         return {
             "version": "1.0",
-            "components": {
-                "instrumental": {
-                    "pattern": "*_instrumental*.mp3",
-                    "multiple": False,
-                    "description": "Base instrumental track"
-                },
-                "mir": {
-                    "pattern": "*.mir.json",
-                    "multiple": False,
-                    "description": "Music Information Retrieval data"
-                }
-            },
+            "components": {},  # Empty components dictionary
             "structure": {
                 "artist_album_format": {
                     "levels": ["artist", "album", "?cd", "track"],

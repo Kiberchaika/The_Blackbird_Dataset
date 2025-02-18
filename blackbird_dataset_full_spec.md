@@ -126,13 +126,7 @@ for name, config in schema.schema["components"].items():
    - Compound extensions are preserved (e.g., `.mir.json`, `.stretched.mp3`)
    - Extensions are used to determine component types (e.g., `_audio` suffix for `.mp3` files)
 
-4. **Component Naming**
-   - Component names are derived from file patterns
-   - Special handling for audio files (adds `_audio` suffix)
-   - Special handling for JSON files with lyrics (adds `_lyrics` suffix)
-   - Section components get `_section` suffix
-
-5. **Multiple Files Per Component**
+4. **Multiple Files Per Component**
    - Components can be configured to allow multiple files per base track
    - To enable multiple files, the following strict naming convention MUST be followed:
      - Files must have a number as the last part before the extension

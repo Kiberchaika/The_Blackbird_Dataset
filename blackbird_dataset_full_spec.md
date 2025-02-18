@@ -212,64 +212,39 @@ Blackbird uses WebDAV for dataset synchronization, with several key features:
 - Rationale: Safer than bi-directional sync, prevents accidental data modification
 - Each machine maintains its own subset of components
 
-#### 3.2 Schema-First Sync
+#### 3.2 Schema and Index Handling During Sync
 
-The sync process begins with schema handling:
+When syncing from a remote source, the schema and index are handled automatically:
 
-1. **Remote Schema Component Reading**
-   ```python
-   # First, read the remote schema
-   remote_schema = client.read_file(".blackbird/schema.json")
-   
-   # If components are specified, only sync those
-   components_to_sync = components if components else remote_schema["components"].keys()
-   ```
+1. **Schema Handling**
+   - If no local schema exists (`.blackbird/schema.json`):
+     - A new schema is created automatically
+     - Components from the remote schema that correspond to the files being pulled are added to the local schema
+   - If local schema exists:
+     - New components from the remote schema are merged into the local schema if they correspond to files being pulled
+     - Existing components in the local schema are preserved
+   - The schema is updated as part of the sync process, no manual schema management is needed
 
-2. **Selective Schema Update**
-   - Only import new/updated components from remote schema
-   - Local schema retains its existing component definitions
-   - Remote schema used for:
-     a. File pattern discovery
-     b. Component type descriptions
-     c. Validation of requested components
-   - By default, all components from remote schema are pulled
-   - If specific components are requested, only those are pulled
-   - Local schema is created if it doesn't exist
-   - Components are validated against remote schema before sync starts
+2. **Index Handling**
+   - The remote index is always downloaded in full during sync operations
+   - This ensures accurate file tracking regardless of which components are being synced
+   - The index is automatically saved to `.blackbird/index.pickle`
 
-Example schema merge:
+Example sync process:
 ```python
-# Local schema has instrumental and vocals
-local_schema = {
-    "components": {
-        "instrumental": {"pattern": "*_instrumental.mp3"},
-        "vocals": {"pattern": "*_vocals_noreverb.mp3"}
-    }
-}
-
-# Remote schema has instrumental, vocals, and mir
-remote_schema = {
-    "components": {
-        "instrumental": {"pattern": "*_instrumental.mp3"},
-        "vocals": {"pattern": "*_vocals_noreverb.mp3"},
-        "mir": {"pattern": "*.mir.json"}
-    }
-}
-
-# After merge, local schema adds mir component
-merged_schema = {
-    "components": {
-        "instrumental": {"pattern": "*_instrumental.mp3"},
-        "vocals": {"pattern": "*_vocals_noreverb.mp3"},
-        "mir": {"pattern": "*.mir.json"}  # New component added
-    }
-}
+# The schema and index are handled automatically
+dataset.sync_from_remote(
+    client,
+    components=["vocals_audio", "mir"],  # Only sync these components
+    artists=["Artist1"]
+)
 ```
 
-3. **Component Validation**
-   - Verify requested components exist in remote schema
-   - Use remote patterns to locate files
-   - Fail fast if components not found
+This process ensures that:
+- The local schema always reflects the components actually present in the local dataset
+- New components are added automatically when their files are synced
+- The index stays in sync with the remote dataset
+- No manual schema or index management is required
 
 #### 3.4 Selective Component Sync
 ```python
@@ -332,56 +307,28 @@ track1.mir.json              # MIR analysis component
 track1_vocals_stretched_120bpm_section1.mp3  # Section component
 ```
 
-Each component serves a specific purpose:
-1. **Instrumental** - The base instrumental track (required)
-2. **Vocals** - Isolated vocals without reverb
-3. **MIR** - Music Information Retrieval analysis data
-4. **Sections** - Cut sections of vocals, time-stretched to 120 BPM
-5. **Lyrics** - Timing information and lyrics text
+### Component Names and Patterns
 
-### Component Definition Properties
+Each component in the schema consists of two key elements:
+1. **Name** - An arbitrary identifier chosen by the user for organizational purposes. The name has no functional impact and serves only as a human-readable label for the component.
+2. **Pattern** - The functional part that defines how files belonging to this component are identified. For example, `"*_vocals.mp3"` will match all files ending with `_vocals.mp3`.
 
-#### 1. Pattern (`pattern`)
-- Uses glob patterns for file matching
-- Must uniquely identify files of this component type
-- Examples:
-  ```json
-  {
-    "instrumental": {"pattern": "*_instrumental.mp3"},
-    "vocals": {"pattern": "*_vocals_noreverb.mp3"},
-    "mir": {"pattern": "*.mir.json"},
-    "sections": {"pattern": "*_vocals_stretched_120bpm_section*.mp3"}
+Example schema components:
+```json
+{
+  "components": {
+    "my_vocals": {                        // Arbitrary name chosen by user
+      "pattern": "*_vocals.mp3",          // Functional pattern that matches files
+      "multiple": false,
+      "description": "Any descriptive text"
+    },
+    "section_data": {                     // Another arbitrary name
+      "pattern": "*_section*.json",       // Pattern is what matters
+      "multiple": true,
+      "description": "Any helpful note"
+    }
   }
-  ```
-- Test coverage: `test_add_component` verifies pattern matching
-
-#### 2. Multiple Files Flag (`multiple`)
-- Allows multiple files per track for this component
-- Examples:
-  - `sections`: `multiple=true` (multiple cut sections per track)
-  - `instrumental`: `multiple=false` (one instrumental per track)
-- Test coverage: Needs new test for multiple file validation
-
-#### 4. Description (`description`)
-- Documents the purpose and format of the component
-- Helps users understand what each component represents
-- Example: `"Isolated vocals without reverb"`
-- Test coverage: Not tested (metadata only)
-
-### Naming Pattern Role
-
-Naming patterns serve multiple purposes:
-1. **Component Identification** - Reliably identify file types
-2. **Track Grouping** - Group related files by base name
-3. **Validation** - Ensure consistent file organization
-4. **Sync Selection** - Enable selective component syncing
-
-Example pattern matching:
-```python
-# Base name: "01 - Track Name"
-"01 - Track Name_instrumental.mp3"      # Matches instrumental pattern
-"01 - Track Name_vocals_noreverb.mp3"   # Matches vocals pattern
-"01 - Track Name.mir.json"              # Matches MIR pattern
+}
 ```
 
 ## Synchronization

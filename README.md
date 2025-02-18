@@ -1,10 +1,13 @@
 # Blackbird Dataset Manager
 
+![Blackbird Dataset Manager](https://github.com/Kiberchaika/The_Blackbird_Dataset/blob/0b2b11f6de602f97d1b4f65fdb1164d7cd5e37b0/blackbird.jpg)
+
+
 This is a tool to manage, synchronize and otherwise work with the Blackbird music dataset.
 
 ## Features
 
-- Flexible dataset structure supporting optional components
+- Flexible dataset structure supporting optional components - various file types per track
 - WebDAV-based synchronization with selective component sync
 - Schema management for dataset structure
 - Statistics and analysis tools

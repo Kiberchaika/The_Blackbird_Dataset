@@ -155,17 +155,6 @@ Example schema.json:
       "multiple": false,
       "description": "Caption from a human captioner describing voice"
     }
-  },
-  "structure": {
-    "artist_album_format": {
-      "levels": ["artist", "album", "?cd", "track"],
-      "cd_pattern": "CD\\d+",
-      "is_cd_optional": true
-    }
-  },
-  "sync": {
-    "default_components": ["instrumental_audio"],
-    "exclude_patterns": ["*.tmp", "*.bak"]
   }
 }
 ```
@@ -257,17 +246,11 @@ dataset.sync_from_remote(
 - Uses remote schema patterns to find relevant files
 - Maintains component consistency between datasets
 
-#### 3.5 Resumable Operations
-- Tracks sync state in `sync_state.json`
-- Records successfully synced files
-- Can resume interrupted syncs
-- Tracks progress and completed bytes
-
-#### 3.6 Progress Tracking
-- Real-time progress updates
-- File counts and byte totals
-- Error tracking with detailed messages
-- Resumable from last successful file
+#### 3.5 Progress Tracking
+- Real-time progress updates using tqdm
+- Shows file counts and byte totals
+- Displays transfer speed and estimated time remaining
+- Reports errors with detailed messages
 
 ### 4. Track Management
 
@@ -330,137 +313,6 @@ Example schema components:
   }
 }
 ```
-
-## Synchronization
-
-### Pull-Only Design
-
-Blackbird implements a pull-only sync design where:
-1. Each machine pulls from remote sources
-2. No pushing to remote is allowed
-3. Schema is pulled first, then files
-
-#### Fail-Fast Behavior
-"Fail-fast" means immediately stopping the operation when an error is detected, rather than trying to continue partially:
-
-1. Schema Validation
-   ```python
-   # If requesting non-existent components
-   sync.sync_from_remote(client, components=["nonexistent"])
-   # Raises ValueError immediately with available components list
-   ```
-   Test coverage: `test_sync_with_missing_component`
-
-2. File Validation
-   ```python
-   # If remote files don't match patterns
-   # Fails before any downloads start
-   ```
-   Test coverage: Needs new test
-
-### Selective Sync Features
-
-#### 1. Component Selection
-```python
-sync.sync_from_remote(client, components=["vocals", "mir"])
-```
-Test coverage: `test_selective_component_pull`
-
-#### 2. Artist Selection
-```python
-# Exact match
-sync.sync_from_remote(client, artists=["Artist1"])
-# Fuzzy match
-sync.sync_from_remote(client, artists=["Art*"])
-```
-Test coverage: `test_find_tracks_by_artist` (for finding, needs sync test)
-
-#### 3. Dataset Proportion
-```python
-# Sync 10% of dataset starting from offset 0
-sync.sync_from_remote(client, proportion=0.1, offset=0)
-```
-Test coverage: Needs new test
-
-#### 4. Combined Filters
-```python
-sync.sync_from_remote(
-    client,
-    components=["vocals"],
-    artists=["Artist1"],
-    proportion=0.1
-)
-```
-Test coverage: Needs new test
-
-### Progress Tracking
-
-1. Schema Update
-   ```
-   Updating schema from remote...
-   ```
-
-2. File Discovery
-   ```
-   Finding remote files to sync...
-   Found 1000 files matching patterns
-   ```
-
-3. Download Progress
-   ```
-   Downloading files: 50/1000 [===>  ] 5%
-   ```
-
-Test coverage: Progress callback testing needs to be added
-
-## Implementation Guidelines
-
-### 1. Error Handling
-- Fail fast on critical errors (e.g., missing remote components)
-- Detailed error messages with context
-- Track partial failures during sync
-- Allow resume after transient failures
-
-### 2. Performance Considerations
-- Efficient file pattern matching
-- Progress tracking for long operations
-- Resumable operations for large syncs
-- Memory-efficient file handling
-
-### 3. Data Integrity
-- Schema validation before operations
-- Sync state tracking
-- Component consistency checks
-- Directory structure validation
-
-## Use Cases
-
-1. **Initial Dataset Setup**
-   ```python
-   dataset = Dataset("/path/to/dataset")
-   dataset.schema.add_component("vocals", "*_vocals_noreverb.mp3")
-   ```
-
-2. **Selective Sync**
-   ```python
-   dataset.sync_from_remote(
-       client,
-       components=["vocals", "mir"],
-       resume=True
-   )
-   ```
-
-3. **Dataset Analysis**
-   ```python
-   stats = dataset.analyze()
-   print(f"Tracks with vocals: {stats['components']['vocals']}")
-   ```
-
-4. **Track Finding**
-   ```python
-   # Find tracks missing MIR data
-   missing_mir = dataset.find_tracks(missing=["mir"])
-   ```
 
 ## Command Line Interface
 

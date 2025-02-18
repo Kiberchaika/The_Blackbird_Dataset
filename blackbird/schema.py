@@ -413,17 +413,7 @@ class DatasetComponentSchema:
         """Create default schema."""
         return {
             "version": "1.0",
-            "components": {},  # Empty components dictionary
-            "structure": {
-                "artist_album_format": {
-                    "levels": ["artist", "album", "?cd", "track"],
-                    "cd_pattern": "CD\\d+",
-                    "is_cd_optional": True
-                }
-            },
-            "sync": {
-                "exclude_patterns": ["*.tmp", "*.bak"]
-            }
+            "components": {}  # Empty components dictionary
         }
     
     def add_component(self, name: str, pattern: str, multiple: bool = False) -> ValidationResult:

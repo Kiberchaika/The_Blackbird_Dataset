@@ -13,6 +13,11 @@ This is a tool to manage, synchronize and otherwise work with the Blackbird musi
 - Statistics and analysis tools
 - Command-line interface for common operations
 
+## TODO
+
+- Continue after download stopped abruptly, and cover that with tests
+It should already skip files that are already downloaded, but that wasn't covered by tests and checked
+
 ## Installation
 
 There are two ways to install the Blackbird Dataset Manager:

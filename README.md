@@ -101,7 +101,7 @@ blackbird init /path/to/dataset
 blackbird status
 
 # Add new component type
-blackbird schema add lyrics "*.lyrics.txt" --required=false
+blackbird schema add lyrics "*.lyrics.txt"
 
 # Sync specific components
 blackbird sync --components=vocals,mir webdav://server

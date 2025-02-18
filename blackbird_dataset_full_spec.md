@@ -4,6 +4,34 @@
 
 Blackbird Dataset Manager is a Python package designed to manage and synchronize music datasets with multiple components. It's specifically built to handle datasets where each track can have multiple associated files (instrumentals, vocals, MIR data, etc.) while maintaining a clear and consistent structure.
 
+Here's an example of different files (we call them components) for a single track in the dataset:
+```
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_instrumental.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix).mir.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_noreverb.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_noreverb.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section10.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section10.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section12.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section12.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section13.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section13.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section1.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section1.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section3.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section3.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section4.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section4.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section5.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section5.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section6.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section6.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section8.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section8.mp3'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section9.json'
+'11.Юта - Жили-были (DJ ЦветкОFF Remix)_vocals_stretched_120bpm_section9.mp3'
+```
+
 ## Core Concepts
 
 ### 1. Dataset Structure
@@ -43,10 +71,7 @@ The schema system defines ONLY the types of files (components) that can exist fo
 3. Whether multiple files of a component are allowed per track
 4. Human-readable descriptions of each component's purpose
 
-When syncing from a remote source, only the components that were specifically requested for sync are pulled from the remote schema. This ensures that:
-1. The local schema only contains components that are actually being used
-2. Different machines can maintain different subsets of components based on their needs
-3. The schema stays minimal and relevant to the local dataset
+When syncing from a remote source, if the local schema does not have a component that exists remotely and was requested, the selective sync operation automatically updates the local schema. This ensures that different machines can maintain different subsets of components based on their needs and that tracking is handled by the schema file.
 
 ### 2.1 Schema Discovery
 

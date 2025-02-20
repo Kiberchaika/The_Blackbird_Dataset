@@ -71,7 +71,7 @@ The schema system defines ONLY the types of files (components) that can exist fo
 3. Whether multiple files of a component are allowed per track
 4. Human-readable descriptions of each component's purpose
 
-When syncing from a remote source, if the local schema does not have a component that exists remotely and was requested, the selective sync operation automatically updates the local schema. This ensures that different machines can maintain different subsets of components based on their needs and that tracking is handled by the schema file.
+When syncing from a remote source, if the local schema does not have a component that exists remotely and was requested, the selective sync operation automatically updates the local schema. This ensures that different machines can maintain different subsets of components based on their needs and that tracking is handled by the schema file. Also, different components can be available for different number of tracks, e.g. some tracks might have a sectioned lyrics component, while others might not.
 
 ### 2.1 Schema Discovery
 

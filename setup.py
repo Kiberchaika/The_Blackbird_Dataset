@@ -11,7 +11,7 @@ setup(
     ],
     entry_points={
         'console_scripts': [
-            'blackbird=blackbird.cli:cli',
+            'blackbird=blackbird.cli:main',
         ],
     },
     author="Your Name",

@@ -203,20 +203,25 @@ class DatasetComponentSchema:
                 # For postfixes starting with underscore, extract name and extension
                 base_part = postfix[1:].split('.')[0]  # Get part between _ and first .
                 ext = ''.join(postfix.split('.')[1:])  # Get all extensions combined
-                if '*' in base_part:
-                    # For numbered sections, include the extension in component name
-                    component_name = f"{base_part}_{ext}"
+                
+                # Check if this is a numbered section pattern
+                if re.search(r"\d+$", base_part):
+                    # For numbered sections, use * to match any number
+                    base_without_number = re.sub(r"\d+$", "", base_part)
+                    component_name = f"{base_without_number}*.{ext}"
+                    pattern = f"*_{base_without_number}*.{ext}"
                 else:
-                    component_name = base_part
-                pattern = f"*{postfix}"
+                    # For regular components, keep the extension in the component name
+                    component_name = f"{base_part}.{ext}"
+                    pattern = f"*_{base_part}.{ext}"
             else:
                 # For files without underscore prefix (like .mir.json),
                 # use the full extension (including dots) as component name
                 component_name = postfix.lstrip('.')  # Remove leading dot but keep internal dots
                 pattern = f"*{postfix}"
 
-            # Handle numbered sections
-            is_multiple = '*' in postfix
+            # Handle numbered sections - check for second asterisk before extension
+            is_multiple = pattern.count('*') > 1
 
             # Add component to schema
             self.schema["components"][component_name] = {
@@ -225,36 +230,33 @@ class DatasetComponentSchema:
                 "description": ""  # Empty description by default
             }
 
-            # Calculate track coverage
-            total_tracks = len(all_base_names)
-            tracks_with_component = len(tracks)
-            missing_track_names = all_base_names - set(tracks.keys())
+            # Calculate track coverage using full paths
+            track_paths = {file 
+                         for base_name, files in tracks.items() 
+                         for file in files}
+            all_track_paths = {file 
+                             for base_name in all_base_names 
+                             for file in all_postfix_groups[postfix][base_name]}
+            
+            total_tracks = len(all_track_paths)
+            tracks_with_component = len(track_paths)
             track_coverage = tracks_with_component / total_tracks if total_tracks > 0 else 0.0
+
+            # Count total files, handling multiple-file components correctly
+            total_files = sum(len(files) for files in tracks.values())
 
             # Add component stats
             stats["components"][component_name] = {
                 "pattern": pattern,
-                "track_count": len(tracks),
-                "file_count": sum(len(files) for files in tracks.values()),
+                "track_count": len(track_paths),
+                "file_count": total_files,
                 "is_multiple": is_multiple,
                 "track_coverage": track_coverage,
                 "has_sections": is_multiple,
-                "unique_tracks": tracks_with_component
+                "unique_tracks": tracks_with_component,
+                "multiple": is_multiple
             }
 
-        # Add structure configuration
-        self.schema["structure"] = {
-            "artist_album_format": {
-                "levels": ["artist", "album", "?cd", "track"],
-                "cd_pattern": "CD\\d+",
-                "is_cd_optional": True
-            }
-        }
-
-        # Add sync configuration
-        self.schema["sync"] = {
-            "exclude_patterns": ["*.tmp", "*.bak"]
-        }
 
         return SchemaDiscoveryResult(is_valid=True, stats=stats)
 
@@ -294,10 +296,7 @@ class DatasetComponentSchema:
         # Check for numbered section pattern - look for numbers before the extension
         section_match = re.search(r"(_.+?)(\d+)([.][^.]+)$", postfix)
         if section_match:
-            # Get everything from first underscore up to the number, then add * and extension
-            pattern_part = section_match.group(1)  # Everything from _ up to the number
-            ext = section_match.group(3)  # The extension including the dot
-            return (f"{pattern_part}*{ext}", True)
+            return (postfix, True)
         
         # Return the full postfix (includes leading underscore if present)
         return (postfix, False)
@@ -324,18 +323,20 @@ class DatasetComponentSchema:
         if not path.exists() or not path.is_dir():
             return defaultdict(lambda: defaultdict(set)), set(), set()
 
-        # Collect all files
+        # Collect all files with their relative paths
         all_files = set()
         for file_path in path.rglob('*'):
             if file_path.is_file() and '.blackbird' not in str(file_path):
-                all_files.add(file_path.name)
+                rel_path = str(file_path.relative_to(path))
+                all_files.add(rel_path)
 
         # Group files by potential base names
         base_name_files = defaultdict(set)
-        for file in all_files:
-            base = self._find_base_name(file)
+        for file_path in all_files:
+            file_name = os.path.basename(file_path)
+            base = self._find_base_name(file_name)
             if base:
-                base_name_files[base].add(file)
+                base_name_files[base].add(file_path)
 
         # Analyze postfixes for each base name
         postfix_groups = defaultdict(lambda: defaultdict(set))
@@ -343,24 +344,42 @@ class DatasetComponentSchema:
         base_names = set()
 
         for base_name, files in base_name_files.items():
-            # Verify all files in this group start with base_name
-            if not all(f.startswith(base_name) for f in files):
+            # Verify all files in this group have filenames starting with base_name
+            if not all(os.path.basename(f).startswith(base_name) for f in files):
                 continue
 
             base_names.add(base_name)
 
-            # First pass: identify numbered components
-            numbered_components = set()
-            for file in files:
-                postfix, is_numbered = self._extract_postfix(file, base_name)
+            # First pass: identify numbered components and their base patterns
+            numbered_patterns = {}  # base pattern -> set of numbered files
+            for file_path in files:
+                file_name = os.path.basename(file_path)
+                postfix, is_numbered = self._extract_postfix(file_name, base_name)
                 if is_numbered:
-                    numbered_components.add(postfix)
+                    # Extract base pattern by removing the number
+                    section_match = re.search(r"(_.+?)(\d+)([.][^.]+)$", postfix)
+                    if section_match:
+                        base_pattern = section_match.group(1) + '*' + section_match.group(3)
+                        if base_pattern not in numbered_patterns:
+                            numbered_patterns[base_pattern] = set()
+                        numbered_patterns[base_pattern].add(file_path)
 
             # Second pass: group files by postfix
-            for file in files:
-                postfix, is_numbered = self._extract_postfix(file, base_name)
-                postfix_groups[postfix][base_name].add(file)
-                unmatched_files.discard(file)
+            for file_path in files:
+                file_name = os.path.basename(file_path)
+                postfix, is_numbered = self._extract_postfix(file_name, base_name)
+                
+                if is_numbered:
+                    # For numbered files, use the base pattern
+                    section_match = re.search(r"(_.+?)(\d+)([.][^.]+)$", postfix)
+                    if section_match:
+                        base_pattern = section_match.group(1) + '*' + section_match.group(3)
+                        postfix_groups[base_pattern][base_name].update(numbered_patterns[base_pattern])
+                else:
+                    # For regular files, use the exact postfix
+                    postfix_groups[postfix][base_name].add(file_path)
+                
+                unmatched_files.discard(file_path)
 
         return postfix_groups, base_names, unmatched_files
 
@@ -435,6 +454,21 @@ class DatasetComponentSchema:
                 warnings=[],
                 stats={}
             )
+        
+        # Check for pattern collisions
+        for existing_name, existing_config in self.schema["components"].items():
+            if existing_config["pattern"] == pattern:
+                # If the component already exists with the same pattern, just update it
+                if existing_name == name:
+                    self.schema["components"][name]["multiple"] = multiple
+                    return self.validate()
+                # Otherwise, it's a collision
+                return ValidationResult(
+                    is_valid=False,
+                    errors=[f"Pattern collision with existing component '{existing_name}': {pattern}"],
+                    warnings=[],
+                    stats={}
+                )
         
         # Add component
         self.schema["components"][name] = {

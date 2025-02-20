@@ -9,11 +9,11 @@ import sys
 import tempfile
 
 @click.group()
-def cli():
-    """Blackbird dataset management tool."""
+def main():
+    """Blackbird Dataset Manager CLI"""
     pass
 
-@cli.command()
+@main.command()
 @click.argument('source')
 @click.argument('destination')
 @click.option('--components', help='Comma-separated list of components to clone')
@@ -66,7 +66,7 @@ def clone(source: str, destination: str, components: Optional[str], artists: Opt
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)
 
-@cli.command()
+@main.command()
 @click.argument('dataset_path', type=click.Path(exists=True))
 def stats(dataset_path: str):
     """Show dataset statistics.
@@ -94,7 +94,7 @@ def stats(dataset_path: str):
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)
 
-@cli.command()
+@main.command()
 @click.argument('dataset_path', type=click.Path(exists=True))
 @click.option('--missing', help='Comma-separated list of components that must be missing')
 @click.option('--has', help='Comma-separated list of components that must be present')
@@ -131,7 +131,7 @@ def find_tracks(dataset_path: str, missing: Optional[str], has: Optional[str],
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)
 
-@cli.group()
+@main.group()
 def schema():
     """Schema management commands."""
     pass
@@ -206,7 +206,7 @@ def add(dataset_path: str, name: str, pattern: str, multiple: bool):
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)
 
-@cli.command()
+@main.command()
 @click.argument('dataset_path', type=click.Path(exists=True))
 def reindex(dataset_path: str):
     """Rebuild dataset index.
@@ -231,4 +231,4 @@ def reindex(dataset_path: str):
         sys.exit(1)
 
 if __name__ == '__main__':
-    cli()
+    main()

@@ -1,1 +1,0 @@
-Fuzzy search is activated only when exact/substring matches yield no results and fuzzy_search=True. It uses case-insensitive comparison by default and returns up to 5 closest matches with a similarity cutoff of 0.6 (using Python's difflib). This allows finding artists with minor typos or spelling variations, making the search more user-friendly. 

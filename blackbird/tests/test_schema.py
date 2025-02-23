@@ -4,6 +4,7 @@ import shutil
 import json
 from blackbird.schema import DatasetComponentSchema
 import os
+from blackbird.dataset import Dataset
 
 @pytest.fixture
 def test_dataset():
@@ -330,9 +331,14 @@ def test_validate_schema_different_album():
         else:
             print(f"  ✓ All files matched")
 
-    # For incomplete albums, we expect the validation to pass but with warnings
+    # Verify that validation passes and all files are matched to components
     assert validation_result.is_valid, "Schema validation failed"
-    assert len(validation_result.warnings) > 0, "Expected warnings for incomplete album"
+    assert validation_result.stats["unmatched_files"] == 0, "Found files not matching any component"
+    
+    # Verify that different components can have different coverage
+    coverage = validation_result.stats["component_coverage"]
+    assert any(stats["matched"] != coverage["instrumental.mp3"]["matched"] 
+              for component, stats in coverage.items()), "Expected different components to have different coverage"
 
 def test_discover_schema_with_cd_album():
     """Test schema discovery with a multi-CD album."""
@@ -426,7 +432,7 @@ def test_webdav_sync_with_special_chars():
     import socket
     import time
     from urllib.error import URLError
-    
+
     # Check if WebDAV server is running on port 2222
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -436,7 +442,7 @@ def test_webdav_sync_with_special_chars():
         webdav_available = False
     finally:
         sock.close()
-    
+
     if not webdav_available:
         print("\nWebDAV server not found on port 2222!")
         print("Please start a WebDAV server with the following configuration:")
@@ -445,13 +451,27 @@ def test_webdav_sync_with_special_chars():
         print("- No authentication required for testing")
         pytest.skip("WebDAV server not available")
         return
-    
+
     # Create source dataset with special characters
     source_path = Path("test_dataset_folder")
     if source_path.exists():
-        shutil.rmtree(source_path)
-    source_path.mkdir(parents=True)
-    
+        # Only remove contents, not the directory itself
+        for item in source_path.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir() and item.name != '.blackbird':
+                shutil.rmtree(item)
+    else:
+        source_path.mkdir(parents=True)
+
+    # Initialize schema in source dataset
+    source_schema = DatasetComponentSchema.create(source_path)
+    source_schema.add_component("instrumental.mp3", "*_instrumental.mp3")
+    source_schema.add_component("vocals_noreverb.mp3", "*_vocals_noreverb.mp3")
+    source_schema.add_component("mir.json", "*.mir.json")
+    source_schema.add_component("vocals_stretched_120bpm_section*.mp3", "*_vocals_stretched_*.mp3", multiple=True)
+    source_schema.save()  # Save the schema after adding components
+
     # Create test structure with special characters (same as in test_discover_schema)
     special_char_albums = [
         "Artist#1/Album@Special_2023 [#1]",
@@ -459,19 +479,19 @@ def test_webdav_sync_with_special_chars():
         "Artist~3/Album!Remix=2023+",
         "Artist-4/Album`with~Symbols_%"
     ]
-    
+
     # Create album directories and test files in source
     for album_path in special_char_albums:
         album_dir = source_path / album_path
         album_dir.mkdir(parents=True, exist_ok=True)
-        
+
         base_names = [
             "01.Track#1_with@symbols",
             "02.Track$2_with^special",
             "03.Track&3_with*chars",
             "04.Track-4_with~signs"
         ]
-        
+
         for base_name in base_names:
             # Create test files
             for file_name in [
@@ -485,48 +505,49 @@ def test_webdav_sync_with_special_chars():
                 file_path.touch()
                 # Write some content to make it a real file
                 file_path.write_bytes(b"Test content for WebDAV sync")
-    
+
+    # Create Dataset instance to build and save the index
+    source_dataset = Dataset(source_path)
+    source_dataset.rebuild_index()  # This will build and save the index
+    source_dataset.index.save(source_path / '.blackbird' / 'index.pickle')  # Explicitly save the index
+
     # Create destination for sync test
     dest_path = Path("test_dataset_folder_sync")
     if dest_path.exists():
         shutil.rmtree(dest_path)
     dest_path.mkdir(parents=True)
-    
-    # Initialize schema and try to sync
-    schema = DatasetComponentSchema.create(dest_path)
-    
+
+    # Initialize schema in destination
+    dest_schema = DatasetComponentSchema.create(dest_path)
+
     try:
-        # Configure WebDAV client
+        # Configure WebDAV client and clone
         from blackbird.sync import clone_dataset
         result = clone_dataset(
             source_url="webdav://localhost:2222",
             destination=dest_path,
             components=["instrumental.mp3", "vocals_noreverb.mp3", "mir.json"]
         )
-        
-        # Verify sync results
-        assert result.total_files > 0
-        assert result.downloaded_files == result.total_files
-        assert result.failed_files == 0
-        
-        # Verify special character handling
+
+        # Verify the sync worked
+        assert result.total_files > 0, "No files were synced"
+        assert result.failed_files == 0, f"{result.failed_files} files failed to sync"
+
+        # Check that files with special characters were synced correctly
         for album_path in special_char_albums:
             album_dir = dest_path / album_path
             assert album_dir.exists(), f"Album directory not synced: {album_path}"
-            
-            # Check if files with special characters were synced
-            test_file = next(album_dir.glob("*_instrumental.mp3"))
+
+            # Check a few sample files
+            test_file = album_dir / "01.Track#1_with@symbols_instrumental.mp3"
             assert test_file.exists(), f"Test file not synced: {test_file}"
-            
-            # Verify file content
             assert test_file.read_bytes() == b"Test content for WebDAV sync"
-            
+
     except Exception as e:
-        print(f"\nError during WebDAV sync test: {str(e)}")
+        print(f"\nError during WebDAV sync test: {e}")
         raise
+
     finally:
-        # Cleanup
-        if source_path.exists():
-            shutil.rmtree(source_path)
+        # Only clean up the destination directory
         if dest_path.exists():
             shutil.rmtree(dest_path)

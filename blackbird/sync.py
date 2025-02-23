@@ -116,12 +116,31 @@ class WebDAVClient:
             # Ensure parent directory exists
             local_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Download file
-            self.client.download_sync(
-                remote_path=remote_path,
-                local_path=str(local_path)
-            )
-            return True
+            # Try to download directly first
+            try:
+                self.client.download_sync(
+                    remote_path=remote_path,
+                    local_path=str(local_path)
+                )
+                return True
+            except Exception as e:
+                if "is_dir" in str(e):
+                    # If is_dir is not supported, try to download using requests directly
+                    import requests
+                    url = f"{self.client.webdav.hostname}/{remote_path.lstrip('/')}"
+                    auth = None
+                    if self.client.webdav.login and self.client.webdav.password:
+                        auth = (self.client.webdav.login, self.client.webdav.password)
+                    response = requests.get(url, auth=auth)
+                    if response.status_code == 200:
+                        local_path.write_bytes(response.content)
+                        return True
+                    else:
+                        logger.error(f"Failed to download {remote_path}: HTTP {response.status_code}")
+                        return False
+                else:
+                    logger.error(f"Failed to download {remote_path}: {e}")
+                    return False
         except Exception as e:
             logger.error(f"Failed to download {remote_path}: {e}")
             return False

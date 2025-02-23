@@ -230,5 +230,49 @@ def reindex(dataset_path: str):
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)
 
+@main.group()
+def webdav():
+    """WebDAV server management commands."""
+    pass
+
+@webdav.command()
+@click.argument('dataset_path', type=click.Path(exists=True))
+@click.option('--port', type=int, required=True, help='Port for WebDAV server')
+@click.option('--username', help='WebDAV username')
+@click.option('--password', help='WebDAV password')
+@click.option('--non-interactive', is_flag=True, help='Run without prompts')
+def setup(dataset_path: str, port: int, username: Optional[str], password: Optional[str], 
+         non_interactive: bool):
+    """Setup WebDAV server for dataset sharing."""
+    from .webdav import WebDAVSetup
+    
+    wizard = WebDAVSetup(
+        dataset_path=Path(dataset_path),
+        port=port,
+        username=username,
+        password=password,
+        non_interactive=non_interactive
+    )
+    
+    if not wizard.run():
+        sys.exit(1)
+
+@webdav.command()
+def list():
+    """List WebDAV shares created by Blackbird."""
+    from .webdav import WebDAVSetup
+    
+    shares = WebDAVSetup.list_shares()
+    if not shares:
+        click.echo("No Blackbird WebDAV shares found")
+        return
+        
+    click.echo("\nFound WebDAV shares:")
+    for share in shares:
+        click.echo(f"\nPort: {share.port}")
+        click.echo(f"Path: {share.path}")
+        click.echo(f"Status: {'Active' if share.is_running() else 'Inactive'}")
+        click.echo(f"Config: {share.config_path}")
+
 if __name__ == '__main__':
     main()

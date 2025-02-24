@@ -10,6 +10,7 @@ import sys
 import tempfile
 import shutil
 from collections import defaultdict
+import random
 
 @click.group()
 def main():
@@ -255,6 +256,86 @@ def find_tracks(dataset_path: str, missing: Optional[str], has: Optional[str],
 def schema():
     """Schema management commands."""
     pass
+
+@schema.command()
+@click.argument('dataset_path', type=click.Path(exists=True))
+@click.option('--num-artists', type=int, default=None, 
+             help='Number of random artists to analyze (default: all artists)')
+@click.option('--test-run', is_flag=True,
+             help='Run in test mode - analyze but do not save schema')
+def discover(dataset_path: str, num_artists: Optional[int], test_run: bool):
+    """Discover and save schema for a dataset.
+    
+    DATASET_PATH: Path to the dataset root directory
+    """
+    try:
+        dataset_path = Path(dataset_path)
+        
+        # Create schema manager
+        schema = DatasetComponentSchema(dataset_path)
+        
+        # Get all artist folders
+        artist_folders = [f for f in dataset_path.iterdir() 
+                         if f.is_dir() and not f.name.startswith('.')]
+        
+        # Select artists to analyze
+        if num_artists is not None:
+            selected_artists = random.sample(artist_folders, min(num_artists, len(artist_folders)))
+        else:
+            selected_artists = artist_folders
+        
+        # Convert to relative paths for discovery
+        artist_paths = [str(f.relative_to(dataset_path)) for f in selected_artists]
+        
+        click.echo("Analyzing artists:")
+        for path in artist_paths:
+            click.echo(f"- {path}")
+        
+        # Discover schema
+        click.echo("\nDiscovering schema...")
+        result = schema.discover_schema(folders=artist_paths)
+        
+        if result.is_valid:
+            click.echo("\nSchema discovery successful!")
+            
+            if not test_run:
+                # Ensure .blackbird directory exists
+                blackbird_dir = dataset_path / ".blackbird"
+                blackbird_dir.mkdir(exist_ok=True)
+                
+                # Save schema
+                schema.save()
+            
+            # Print discovered schema in a more readable format
+            click.echo("\nDiscovered Components:")
+            for name, config in schema.schema["components"].items():
+                click.echo(f"\n{name}:")
+                click.echo(f"  Pattern: {config['pattern']}")
+                click.echo(f"  Multiple: {config['multiple']}")
+                if "description" in config:
+                    click.echo(f"  Description: {config['description']}")
+                    
+                # Print corresponding statistics
+                if name in result.stats["components"]:
+                    stats = result.stats["components"][name]
+                    click.echo("\n  Statistics:")
+                    click.echo(f"    Files found: {stats['file_count']}")
+                    click.echo(f"    Track coverage: {stats['track_coverage']*100:.1f}%")
+                    click.echo(f"    Unique tracks: {stats['unique_tracks']}")
+                    click.echo(f"    Has sections: {stats['has_sections']}")
+            
+            if not test_run:
+                click.echo(f"\nSchema saved to {schema.schema_path}")
+            else:
+                click.echo("\nTest run completed - schema was not saved")
+        else:
+            click.echo("\nSchema discovery failed with errors:")
+            for error in result.errors:
+                click.echo(f"- {error}")
+            sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {str(e)}", err=True)
+        sys.exit(1)
 
 @schema.command()
 @click.argument('dataset_path')

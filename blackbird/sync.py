@@ -60,8 +60,9 @@ class WebDAVClient:
             host = parsed.netloc
             
         # Configure client options
+        self.base_url = f"http://{host}"
         options = {
-            'webdav_hostname': f"http://{host}",
+            'webdav_hostname': self.base_url,
             'webdav_root': parsed.path or '/',
             'webdav_timeout': 30,
             'disable_check': True  # Add this to prevent initial check
@@ -72,8 +73,24 @@ class WebDAVClient:
             options['webdav_password'] = password
             
         self.client = webdav.Client(options)
-        logger.info(f"WebDAV client configured with options: {options}")
+        logger.info(f"WebDAV client configured for server: {self.base_url}")
         
+    def check_connection(self) -> bool:
+        """Check if the WebDAV server is accessible.
+        
+        Returns:
+            bool: True if server is accessible
+        """
+        try:
+            import requests
+            response = requests.head(self.base_url)
+            if response.status_code == 405:  # Method not allowed is OK, server is responding
+                return True
+            return 200 <= response.status_code < 400
+        except Exception as e:
+            logger.error(f"Failed to connect to WebDAV server: {e}")
+            return False
+            
     def list_files(self, path: str = '') -> List[Dict[str, str]]:
         """List files in remote directory.
         
@@ -84,6 +101,9 @@ class WebDAVClient:
             List of file info dictionaries with 'path' and 'size' keys
         """
         try:
+            if not self.check_connection():
+                raise ValueError(f"Cannot connect to WebDAV server at {self.base_url}")
+                
             logger.info(f"Listing files in path: {path}")
             files = self.client.list(path or '/', get_info=True)
             logger.info(f"Raw WebDAV response: {files[:5]}")  # Log first 5 entries
@@ -116,31 +136,38 @@ class WebDAVClient:
             # Ensure parent directory exists
             local_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Try to download directly first
+            # Try direct HTTP download first
             try:
-                self.client.download_sync(
-                    remote_path=remote_path,
-                    local_path=str(local_path)
-                )
-                return True
-            except Exception as e:
-                if "is_dir" in str(e):
-                    # If is_dir is not supported, try to download using requests directly
-                    import requests
-                    url = f"{self.client.webdav.hostname}/{remote_path.lstrip('/')}"
-                    auth = None
-                    if self.client.webdav.login and self.client.webdav.password:
-                        auth = (self.client.webdav.login, self.client.webdav.password)
-                    response = requests.get(url, auth=auth)
-                    if response.status_code == 200:
-                        local_path.write_bytes(response.content)
-                        return True
-                    else:
-                        logger.error(f"Failed to download {remote_path}: HTTP {response.status_code}")
-                        return False
-                else:
-                    logger.error(f"Failed to download {remote_path}: {e}")
+                import requests
+                url = f"{self.base_url}/{remote_path.lstrip('/')}"
+                auth = None
+                if hasattr(self.client.webdav, 'login') and hasattr(self.client.webdav, 'password'):
+                    auth = (self.client.webdav.login, self.client.webdav.password)
+                
+                response = requests.get(url, auth=auth)
+                if response.status_code == 200:
+                    local_path.write_bytes(response.content)
+                    return True
+                elif response.status_code == 404:
+                    logger.error(f"File not found: {remote_path}")
                     return False
+                else:
+                    logger.error(f"Failed to download {remote_path}: HTTP {response.status_code}")
+                    return False
+                    
+            except Exception as e:
+                # Fall back to WebDAV client if direct HTTP fails
+                logger.warning(f"Direct HTTP download failed, trying WebDAV: {e}")
+                try:
+                    self.client.download_sync(
+                        remote_path=remote_path,
+                        local_path=str(local_path)
+                    )
+                    return True
+                except Exception as e2:
+                    logger.error(f"WebDAV download also failed: {e2}")
+                    return False
+                    
         except Exception as e:
             logger.error(f"Failed to download {remote_path}: {e}")
             return False
@@ -316,7 +343,7 @@ def clone_dataset(
         # Create a temporary path for the remote schema
         temp_schema_path = destination / '.blackbird' / 'remote_schema.json'
         if not client.download_file('.blackbird/schema.json', temp_schema_path):
-            raise ValueError("Failed to download schema from remote")
+            raise ValueError(f"Failed to download schema from remote. Please check if the WebDAV server at {source_url} is accessible and contains a valid Blackbird dataset.")
             
         # Load remote schema
         remote_schema = DatasetComponentSchema.load(temp_schema_path)
@@ -330,10 +357,12 @@ def clone_dataset(
             local_schema.schema['components'] = {}  # Start with empty components
         
         # Validate requested components against remote schema
+        available_components = set(remote_schema.schema['components'].keys())
         if components:
-            invalid_components = set(components) - set(remote_schema.schema['components'].keys())
+            invalid_components = set(components) - available_components
             if invalid_components:
-                raise ValueError(f"Invalid components: {invalid_components}")
+                error_msg = f"Invalid components: {invalid_components}\nAvailable components are: {sorted(available_components)}"
+                raise ValueError(error_msg)
                 
             # Update local schema with only the requested components from remote
             for component in components:
@@ -352,7 +381,7 @@ def clone_dataset(
         logger.info("\nDownloading dataset index...")
         index_path = destination / '.blackbird' / 'index.pickle'
         if not client.download_file('.blackbird/index.pickle', index_path):
-            raise ValueError("Failed to download index from remote")
+            raise ValueError(f"Failed to download index from remote. Please check if the WebDAV server at {source_url} is accessible and contains a valid Blackbird dataset.")
             
         # Load index
         index = DatasetIndex.load(index_path)

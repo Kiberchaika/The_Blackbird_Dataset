@@ -20,11 +20,12 @@ def main():
 @click.argument('source')
 @click.argument('destination')
 @click.option('--components', help='Comma-separated list of components to clone')
+@click.option('--missing', help='Only clone components for tracks missing this component')
 @click.option('--artists', help='Comma-separated list of artists to clone (supports glob patterns)')
 @click.option('--proportion', type=float, help='Proportion of dataset to clone (0-1)')
 @click.option('--offset', type=int, default=0, help='Offset for proportion-based cloning')
-def clone(source: str, destination: str, components: Optional[str], artists: Optional[str], 
-         proportion: Optional[float], offset: Optional[int]):
+def clone(source: str, destination: str, components: Optional[str], missing: Optional[str],
+         artists: Optional[str], proportion: Optional[float], offset: Optional[int]):
     """Clone dataset from remote source.
     
     SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
@@ -42,6 +43,8 @@ def clone(source: str, destination: str, components: Optional[str], artists: Opt
         click.echo(f"Cloning from {source} to {destination}")
         if component_list:
             click.echo(f"Components: {', '.join(component_list)}")
+        if missing:
+            click.echo(f"Only for tracks missing: {missing}")
         if artist_list:
             click.echo(f"Artists: {', '.join(artist_list)}")
         if proportion:
@@ -52,6 +55,7 @@ def clone(source: str, destination: str, components: Optional[str], artists: Opt
             source_url=source,
             destination=Path(destination),
             components=component_list,
+            missing_component=missing,
             artists=artist_list,
             proportion=proportion,
             offset=offset
@@ -71,7 +75,8 @@ def clone(source: str, destination: str, components: Optional[str], artists: Opt
 
 @main.command()
 @click.argument('dataset_path')
-def stats(dataset_path: str):
+@click.option('--missing', help='Show statistics for tracks missing this component')
+def stats(dataset_path: str, missing: Optional[str]):
     """Show dataset statistics.
     
     DATASET_PATH: Path to the dataset or WebDAV URL
@@ -102,10 +107,25 @@ def stats(dataset_path: str):
             component_counts = defaultdict(int)
             component_sizes = defaultdict(int)
             
-            for track in index.tracks.values():
+            # Track missing component stats if requested
+            missing_stats = defaultdict(int) if missing else None
+            missing_artists = set() if missing else None
+            missing_albums = set() if missing else None
+            
+            for track_path, track in index.tracks.items():
+                # Count regular components
                 for comp_name, file_path in track.files.items():
                     component_counts[comp_name] += 1
                     component_sizes[comp_name] += track.file_sizes[file_path]
+                
+                # Check for missing component if requested
+                if missing and missing not in track.files:
+                    # Count other components present in tracks missing the specified one
+                    for comp_name in track.files:
+                        missing_stats[comp_name] += 1
+                    # Track artists and albums with missing files
+                    missing_artists.add(track.artist)
+                    missing_albums.add(track.album_path)
             
             # Print statistics
             click.echo("\nDataset Statistics:")
@@ -117,6 +137,17 @@ def stats(dataset_path: str):
             for comp_name, count in sorted(component_counts.items()):
                 size_gb = component_sizes[comp_name] / (1024*1024*1024)
                 click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            
+            # Show missing component statistics if requested
+            if missing:
+                total_missing = len(index.tracks) - component_counts.get(missing, 0)
+                click.echo(f"\nTracks missing '{missing}' component:")
+                click.echo(f"Total tracks without {missing}: {total_missing}")
+                click.echo(f"Artists affected: {len(missing_artists)}")
+                click.echo(f"Albums affected: {len(missing_albums)}")
+                click.echo("\nComponents present in tracks missing this one:")
+                for comp_name, count in sorted(missing_stats.items()):
+                    click.echo(f"- {comp_name}: {count} files")
             
             # Clean up
             shutil.rmtree(temp_dir)

@@ -325,12 +325,27 @@ def clone_dataset(
     source_url: str,
     destination: Path,
     components: Optional[List[str]] = None,
+    missing_component: Optional[str] = None,
     artists: Optional[List[str]] = None,
     proportion: Optional[float] = None,
     offset: int = 0,
     progress_callback = None
 ) -> SyncStats:
-    """Clone dataset from remote source."""
+    """Clone dataset from remote source.
+    
+    Args:
+        source_url: WebDAV URL to clone from
+        destination: Local path to clone to
+        components: List of components to clone
+        missing_component: Only clone components for tracks missing this component
+        artists: List of artists to clone
+        proportion: Proportion of dataset to clone (0-1)
+        offset: Offset for proportion-based cloning
+        progress_callback: Optional callback for progress updates
+        
+    Returns:
+        SyncStats with clone results
+    """
     # Initialize client and stats
     client = WebDAVClient(source_url)
     stats = SyncStats()
@@ -391,20 +406,37 @@ def clone_dataset(
         component_counts = defaultdict(int)
         component_patterns = {}
         component_sizes = defaultdict(int)
-        for track_info in index.tracks.values():
+        
+        # Filter tracks based on missing component if specified
+        tracks_to_process = {}
+        for track_path, track_info in index.tracks.items():
+            # Skip if we're looking for tracks missing a component and this track has it
+            if missing_component and missing_component in track_info.files:
+                continue
+                
+            # Skip if we're filtering by artist and this track's artist isn't in the list
+            if artists and track_info.artist not in artists:
+                continue
+                
+            # Add track to processing list
+            tracks_to_process[track_path] = track_info
+            
+            # Count components
             for comp_name, file_path in track_info.files.items():
-                component_counts[comp_name] += 1
-                component_sizes[comp_name] += track_info.file_sizes[file_path]
-                if comp_name in remote_schema.schema['components']:
-                    component_patterns[comp_name] = remote_schema.schema['components'][comp_name]['pattern']
+                if not components or comp_name in components:
+                    component_counts[comp_name] += 1
+                    component_sizes[comp_name] += track_info.file_sizes[file_path]
+                    if comp_name in remote_schema.schema['components']:
+                        component_patterns[comp_name] = remote_schema.schema['components'][comp_name]['pattern']
         
         # Log index statistics
         logger.info(f"\nIndex Statistics:")
-        logger.info(f"Total tracks: {len(index.tracks)}")
-        logger.info(f"Total artists: {len(index.album_by_artist)}")
+        logger.info(f"Total tracks to process: {len(tracks_to_process)}")
+        if missing_component:
+            logger.info(f"Tracks missing '{missing_component}': {len(tracks_to_process)}")
         
         if components:
-            logger.info("\nRequested components in index:")
+            logger.info("\nRequested components in filtered tracks:")
             for comp_name in components:
                 count = component_counts[comp_name]
                 pattern = component_patterns.get(comp_name, "unknown pattern")
@@ -427,35 +459,22 @@ def clone_dataset(
                 if not click.confirm("\nContinue anyway?", default=False):
                     raise ValueError("Aborted due to missing files for requested components")
         
-        # Get list of artists to process
-        target_artists = artists if artists else list(index.album_by_artist.keys())
-        logger.info(f"\nProcessing artists: {target_artists}")
-        
         # Find all files to download based on index
         all_files = []  # List of (file_path, file_size) tuples
         stats.total_files = 0
         stats.total_size = 0
         
-        # Process each artist
-        for artist in target_artists:
-            if artist not in index.album_by_artist:
-                logger.warning(f"Artist not found in index: {artist}")
-                continue
-                
-            # Get all tracks for this artist
-            for album_path in index.album_by_artist[artist]:
-                for track_path in index.track_by_album[album_path]:
-                    track = index.tracks[track_path]
-                    
-                    # Check each requested component
-                    target_components = components if components else local_schema.schema['components'].keys()
-                    for component in target_components:
-                        if component in track.files:
-                            file_path = track.files[component]
-                            file_size = track.file_sizes[file_path]
-                            all_files.append((file_path, file_size))
-                            stats.total_files += 1
-                            stats.total_size += file_size
+        # Process filtered tracks
+        for track_info in tracks_to_process.values():
+            # Check each requested component
+            target_components = components if components else local_schema.schema['components'].keys()
+            for component in target_components:
+                if component in track_info.files:
+                    file_path = track_info.files[component]
+                    file_size = track_info.file_sizes[file_path]
+                    all_files.append((file_path, file_size))
+                    stats.total_files += 1
+                    stats.total_size += file_size
         
         # Download files with progress bar
         with tqdm(total=stats.total_size, unit='B', unit_scale=True) as pbar:

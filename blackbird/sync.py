@@ -11,6 +11,7 @@ import webdav3.client as webdav
 import fnmatch
 from difflib import get_close_matches
 import click
+from collections import defaultdict
 
 from .schema import DatasetComponentSchema
 from .index import DatasetIndex
@@ -385,13 +386,50 @@ def clone_dataset(
             
         # Load index
         index = DatasetIndex.load(index_path)
-        logger.info(f"Index loaded successfully:")
+        
+        # Analyze index contents
+        component_counts = defaultdict(int)
+        component_patterns = {}
+        component_sizes = defaultdict(int)
+        for track_info in index.tracks.values():
+            for comp_name, file_path in track_info.files.items():
+                component_counts[comp_name] += 1
+                component_sizes[comp_name] += track_info.file_sizes[file_path]
+                if comp_name in remote_schema.schema['components']:
+                    component_patterns[comp_name] = remote_schema.schema['components'][comp_name]['pattern']
+        
+        # Log index statistics
+        logger.info(f"\nIndex Statistics:")
         logger.info(f"Total tracks: {len(index.tracks)}")
         logger.info(f"Total artists: {len(index.album_by_artist)}")
         
+        if components:
+            logger.info("\nRequested components in index:")
+            for comp_name in components:
+                count = component_counts[comp_name]
+                pattern = component_patterns.get(comp_name, "unknown pattern")
+                size_gb = component_sizes[comp_name] / (1024*1024*1024)
+                logger.info(f"- {comp_name}:")
+                logger.info(f"  Pattern: {pattern}")
+                logger.info(f"  Files found: {count}")
+                logger.info(f"  Total size: {size_gb:.2f} GB")
+                if count == 0:
+                    logger.warning(f"  WARNING: No files found for component '{comp_name}'")
+        
+        # Check if requested components have files
+        if components:
+            missing_files = [comp for comp in components if component_counts[comp] == 0]
+            if missing_files:
+                logger.warning(f"\nWarning: The following components have no files in the index:")
+                for comp in missing_files:
+                    pattern = component_patterns.get(comp, "unknown pattern")
+                    logger.warning(f"- {comp} (pattern: {pattern})")
+                if not click.confirm("\nContinue anyway?", default=False):
+                    raise ValueError("Aborted due to missing files for requested components")
+        
         # Get list of artists to process
         target_artists = artists if artists else list(index.album_by_artist.keys())
-        logger.info(f"Processing artists: {target_artists}")
+        logger.info(f"\nProcessing artists: {target_artists}")
         
         # Find all files to download based on index
         all_files = []  # List of (file_path, file_size) tuples

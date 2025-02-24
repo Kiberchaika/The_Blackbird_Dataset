@@ -269,15 +269,27 @@ def reindex(dataset_path: str):
         click.echo("Rebuilding dataset index...")
         dataset = Dataset(Path(dataset_path))
         dataset.rebuild_index()
-        click.echo("Index rebuilt successfully!")
         
-        # Show some stats about the new index
-        stats = dataset.analyze()
+        # Calculate component statistics
+        component_counts = defaultdict(int)
+        component_sizes = defaultdict(int)
+        for track in dataset._index.tracks.values():
+            for comp_name, file_path in track.files.items():
+                component_counts[comp_name] += 1
+                component_sizes[comp_name] += track.file_sizes[file_path]
+        
+        # Show statistics
+        click.echo("\nIndex rebuilt successfully!")
         click.echo(f"\nNew index statistics:")
-        click.echo(f"Total tracks: {stats['tracks']['total']}")
-        click.echo(f"Total artists: {len(stats['artists'])}")
-        click.echo(f"Total albums: {sum(len(albums) for albums in stats['albums'].values())}")
-        
+        click.echo(f"Total tracks: {len(dataset._index.tracks)}")
+        click.echo(f"Total artists: {len(dataset._index.album_by_artist)}")
+        click.echo(f"Total albums: {sum(len(albums) for albums in dataset._index.album_by_artist.values())}")
+        click.echo(f"\nComponents indexed:")
+        for comp_name in sorted(component_counts.keys()):
+            count = component_counts[comp_name]
+            size_gb = component_sizes[comp_name] / (1024*1024*1024)
+            click.echo(f"  {comp_name}: {count} files ({size_gb:.2f} GB)")
+            
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)

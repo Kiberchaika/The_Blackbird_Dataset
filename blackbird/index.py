@@ -165,21 +165,8 @@ class DatasetIndex:
 
     @classmethod
     def build(cls, dataset_path: Path, schema: 'DatasetComponentSchema', progress_callback=None) -> 'DatasetIndex':
-        """Build a new index for the dataset.
-        
-        Args:
-            dataset_path: Path to dataset root directory
-            schema: Dataset component schema
-            progress_callback: Optional callback for progress updates
-            
-        Returns:
-            New DatasetIndex instance
-        """
+        """Build a new index for the dataset."""
         index = cls.create()
-        file_groups = {
-            comp_name: []
-            for comp_name in schema.schema["components"]
-        }
         
         # First count total directories for progress bar
         logger.info("Counting directories...")
@@ -189,142 +176,135 @@ class DatasetIndex:
         # Find all files with progress
         logger.info("Finding all files...")
         found_count = 0
+        matched_count = 0
         start_time = time.time()
         
-        logger.info("Components to match:")
-        for comp_name, comp_info in schema.schema["components"].items():
-            logger.info(f"  {comp_name}: {comp_info['pattern']}")
+        # Track files by directory and base name
+        track_files = defaultdict(lambda: defaultdict(dict))  # dir -> base_name -> comp_name -> (path, size)
+        unmatched_files = []
         
-        with tqdm(total=total_dirs, desc="Scanning directories") as pbar:
-            for root, _, files in os.walk(dataset_path):
-                for filename in files:
-                    file_path = Path(root) / filename
-                    found_count += 1
-                    logger.debug(f"Processing file: {filename}")
-                    
-                    # Group file by pattern
-                    for comp_name, comp_info in schema.schema["components"].items():
-                        pattern = comp_info["pattern"]
-                        # Convert glob pattern to regex pattern
-                        regex_pattern = pattern.replace(".", "\\.").replace("*", ".*")
-                        if re.search(regex_pattern + "$", filename):
-                            logger.debug(f"  Matched {comp_name} with pattern {regex_pattern}")
-                            rel_path = file_path.relative_to(dataset_path)
-                            size = file_path.stat().st_size
-                            file_groups[comp_name].append((rel_path, size))
-                            break  # File can only match one pattern
-                
-                # Update progress
-                pbar.set_postfix({"files": found_count}, refresh=True)
-                pbar.update(1)
-        
-        elapsed = time.time() - start_time
-        rate = found_count / elapsed if elapsed > 0 else 0
-        logger.info(f"Found {found_count} total files in {elapsed:.1f} seconds ({rate:.0f} files/sec)")
-        
-        logger.info("Files found by component:")
-        for comp_name, files in file_groups.items():
-            logger.info(f"  {comp_name}: {len(files)} files")
-            for rel_path, size in files:
-                logger.debug(f"    {rel_path}")
-        
-        # Create lookup for companion files by directory and base name
-        t_lookup = time.time()
-        companion_lookup = defaultdict(lambda: defaultdict(dict))
-        
-        # Extract patterns from schema
+        # Extract patterns to remove for getting base names
         patterns_to_remove = []
         for comp_name, comp_info in schema.schema["components"].items():
             pattern = comp_info["pattern"]
             if pattern.startswith("*"):
-                # Convert glob pattern to regex for extraction
-                # e.g. "*_instrumental.mp3" -> "_instrumental.mp3"
-                # e.g. "*.mir.json" -> ".mir.json"
                 patterns_to_remove.append(pattern[1:])
         
-        # Use first component as base for track creation
-        # This could be made configurable in the future if needed
-        base_component_name = next(iter(schema.schema["components"].keys()))
-        base_component_info = schema.schema["components"][base_component_name]
-        
-        # Build companion lookup
-        for comp_name, files in file_groups.items():
-            if comp_name == base_component_name:  # Skip base component
-                continue
-            for rel_path, size in files:
-                dir_path = str(rel_path.parent)
-                base_name = rel_path.stem
+        with tqdm(total=total_dirs, desc="Scanning directories") as pbar:
+            for root, _, files in os.walk(dataset_path):
+                for filename in files:
+                    if filename.startswith('.') or '.blackbird' in Path(root).parts:
+                        continue
+                        
+                    file_path = Path(root) / filename
+                    found_count += 1
+                    
+                    # Try to match file against component patterns
+                    file_matched = False
+                    for comp_name, comp_info in schema.schema["components"].items():
+                        pattern = comp_info["pattern"]
+                        regex_pattern = pattern.replace(".", "\\.").replace("*", ".*")
+                        if re.search(regex_pattern + "$", filename):
+                            rel_path = file_path.relative_to(dataset_path)
+                            size = file_path.stat().st_size
+                            
+                            # Get base name by removing all component patterns
+                            base_name = filename
+                            for pattern in patterns_to_remove:
+                                pattern_base = Path(pattern).stem
+                                if pattern_base:
+                                    base_name = base_name.replace(pattern_base, '')
+                            base_name = Path(base_name).stem  # Remove extension
+                            
+                            # Store file info
+                            dir_path = str(rel_path.parent)
+                            track_files[dir_path][base_name][comp_name] = (rel_path, size)
+                            matched_count += 1
+                            file_matched = True
+                            break
+                    
+                    if not file_matched and not filename.endswith(('.tmp', '.bak')):
+                        unmatched_files.append(str(file_path.relative_to(dataset_path)))
                 
-                # Remove all component patterns to get base name
-                for pattern in patterns_to_remove:
-                    pattern_base = Path(pattern).stem  # Remove extension
-                    if pattern_base:  # Only remove if pattern has a base part
-                        base_name = base_name.replace(pattern_base, '')
-                
-                companion_lookup[dir_path][base_name][comp_name] = (rel_path, size)
-        logger.info(f"Built companion lookup in {(time.time() - t_lookup) * 1000:.0f}ms")
-        
-        # Process base component files to build index
-        base_files = file_groups[base_component_name]
-        logger.info(f"Processing {len(base_files)} {base_component_name} files...")
-        
-        # Process files with progress bar
-        with tqdm(total=len(base_files), desc="Building index") as pbar:
-            for rel_path, size in base_files:
-                # Get path components (all string operations, no I/O)
-                parts = rel_path.parts
-                artist = parts[0]
-                album = parts[1]
-                album_path = str(Path(artist) / album)
-                
-                cd_number = None
-                if len(parts) == 4:  # artist/album/cd/file
-                    cd_dir = parts[2]
-                    if cd_dir.startswith('CD'):
-                        cd_number = cd_dir
-                
-                # Get base name (string operations)
-                base_name = rel_path.stem
-                # Remove base component pattern to get clean base name
-                base_pattern = base_component_info["pattern"][1:]  # Remove leading *
-                pattern_base = Path(base_pattern).stem
-                if pattern_base:
-                    base_name = base_name.replace(pattern_base, '')
-                
-                dir_path = str(rel_path.parent)
-                
-                # Create track path
-                track_path = str(Path(album_path) / base_name)
-                if cd_number:
-                    track_path = str(Path(album_path) / cd_number / base_name)
-                
-                # Create track info
-                track = TrackInfo(
-                    track_path=track_path,
-                    artist=artist,
-                    album_path=album_path,
-                    cd_number=cd_number,
-                    base_name=base_name,
-                    files={base_component_name: str(rel_path)},
-                    file_sizes={str(rel_path): size}
-                )
-                
-                # Find companion files using lookup (no I/O)
-                if dir_path in companion_lookup and base_name in companion_lookup[dir_path]:
-                    for comp_name, (comp_path, comp_size) in companion_lookup[dir_path][base_name].items():
-                        track.files[comp_name] = str(comp_path)
-                        track.file_sizes[str(comp_path)] = comp_size
-                        index.total_size += comp_size
-                
-                # Update index (memory operations only)
-                index.tracks[track_path] = track
-                index.track_by_album.setdefault(album_path, set()).add(track_path)
-                index.album_by_artist.setdefault(artist, set()).add(album_path)
-                index.total_size += size
-                
+                pbar.set_postfix({"files": found_count, "matched": matched_count}, refresh=True)
                 pbar.update(1)
-                if progress_callback:
-                    progress_callback(pbar.n / pbar.total)
+        
+        elapsed = time.time() - start_time
+        rate = found_count / elapsed if elapsed > 0 else 0
+        logger.info(f"\nIndexing summary:")
+        logger.info(f"Total files found: {found_count}")
+        logger.info(f"Files matched to components: {matched_count}")
+        logger.info(f"Unmatched files: {len(unmatched_files)}")
+        logger.info(f"Processing rate: {rate:.0f} files/sec")
+        
+        # Create tracks from grouped files
+        logger.info("\nCreating tracks from matched files...")
+        component_counts = defaultdict(int)
+        component_sizes = defaultdict(int)
+        
+        with tqdm(total=sum(len(base_names) for base_names in track_files.values()), desc="Creating tracks") as pbar:
+            for dir_path, base_names in track_files.items():
+                for base_name, components in base_names.items():
+                    # Extract path components
+                    parts = Path(dir_path).parts
+                    artist = parts[0]
+                    album = parts[1]
+                    album_path = str(Path(artist) / album)
+                    
+                    cd_number = None
+                    if len(parts) == 3 and parts[2].startswith('CD'):  # artist/album/cd
+                        cd_number = parts[2]
+                    
+                    # Create track path
+                    track_path = str(Path(album_path) / base_name)
+                    if cd_number:
+                        track_path = str(Path(album_path) / cd_number / base_name)
+                    
+                    # Create track info with all components
+                    track = TrackInfo(
+                        track_path=track_path,
+                        artist=artist,
+                        album_path=album_path,
+                        cd_number=cd_number,
+                        base_name=base_name,
+                        files={},
+                        file_sizes={}
+                    )
+                    
+                    # Add all components
+                    for comp_name, (rel_path, size) in components.items():
+                        track.files[comp_name] = str(rel_path)
+                        track.file_sizes[str(rel_path)] = size
+                        index.total_size += size
+                        component_counts[comp_name] += 1
+                        component_sizes[comp_name] += size
+                    
+                    # Update index
+                    index.tracks[track_path] = track
+                    index.track_by_album.setdefault(album_path, set()).add(track_path)
+                    index.album_by_artist.setdefault(artist, set()).add(album_path)
+                    
+                    pbar.update(1)
+                    if progress_callback:
+                        progress_callback(pbar.n / pbar.total)
+        
+        # Print detailed indexing results
+        logger.info("\nIndexing Results:")
+        logger.info(f"Total tracks indexed: {len(index.tracks)}")
+        logger.info(f"Total artists: {len(index.album_by_artist)}")
+        logger.info(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
+        logger.info(f"Total size: {index.total_size / (1024*1024*1024):.2f} GB")
+        
+        logger.info("\nComponents indexed:")
+        for comp_name in sorted(component_counts.keys()):
+            count = component_counts[comp_name]
+            size_gb = component_sizes[comp_name] / (1024*1024*1024)
+            logger.info(f"  {comp_name}: {count} files ({size_gb:.2f} GB)")
+        
+        if len(unmatched_files) > 0:
+            logger.info("\nSample of unmatched files (first 10):")
+            for f in sorted(unmatched_files)[:10]:
+                logger.info(f"  {f}")
         
         index.last_updated = datetime.now()
         return index 

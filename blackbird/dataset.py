@@ -35,10 +35,30 @@ class Dataset:
         
     def _rebuild_index(self) -> DatasetIndex:
         """Build a fresh index of the dataset."""
-        logger.info(f"Rebuilding index for dataset at {self.path}")
+        logger.info(f"Rebuilding dataset index...")
         logger.info(f"Schema components: {list(self._schema.schema['components'].keys())}")
         index = DatasetIndex.build(self.path, self._schema)
-        logger.info(f"Built index with {len(index.tracks)} tracks")
+        
+        # Calculate component statistics
+        component_counts = defaultdict(int)
+        component_sizes = defaultdict(int)
+        for track in index.tracks.values():
+            for comp_name, file_path in track.files.items():
+                component_counts[comp_name] += 1
+                component_sizes[comp_name] += track.file_sizes[file_path]
+        
+        # Print statistics
+        logger.info("\nIndex rebuilt successfully!")
+        logger.info(f"\nNew index statistics:")
+        logger.info(f"Total tracks: {len(index.tracks)}")
+        logger.info(f"Total artists: {len(index.album_by_artist)}")
+        logger.info(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
+        logger.info(f"\nComponents indexed:")
+        for comp_name in sorted(component_counts.keys()):
+            count = component_counts[comp_name]
+            size_gb = component_sizes[comp_name] / (1024*1024*1024)
+            logger.info(f"  {comp_name}: {count} files ({size_gb:.2f} GB)")
+        
         return index
         
     def validate(self) -> ValidationResult:

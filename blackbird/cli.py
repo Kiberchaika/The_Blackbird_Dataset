@@ -157,22 +157,59 @@ def stats(dataset_path: str, missing: Optional[str]):
             if not Path(dataset_path).exists():
                 raise ValueError(f"Path '{dataset_path}' does not exist")
                 
-            dataset = Dataset(Path(dataset_path))
-            # Force rebuild index to ensure we have current data
-            dataset.rebuild_index()
-            stats_result = dataset.analyze()
+            # Load existing index
+            index_path = Path(dataset_path) / ".blackbird" / "index.pickle"
+            if not index_path.exists():
+                raise ValueError(f"Index not found at {index_path}. Run 'blackbird reindex' first.")
+                
+            index = DatasetIndex.load(index_path)
             
+            # Count components and their sizes
+            component_counts = defaultdict(int)
+            component_sizes = defaultdict(int)
+            
+            # Track missing component stats if requested
+            missing_stats = defaultdict(int) if missing else None
+            missing_artists = set() if missing else None
+            missing_albums = set() if missing else None
+            
+            for track_path, track in index.tracks.items():
+                # Count regular components
+                for comp_name, file_path in track.files.items():
+                    component_counts[comp_name] += 1
+                    component_sizes[comp_name] += track.file_sizes[file_path]
+                
+                # Check for missing component if requested
+                if missing and missing not in track.files:
+                    # Count other components present in tracks missing the specified one
+                    for comp_name in track.files:
+                        missing_stats[comp_name] += 1
+                    # Track artists and albums with missing files
+                    missing_artists.add(track.artist)
+                    missing_albums.add(track.album_path)
+            
+            # Print statistics
             click.echo("\nDataset Statistics:")
-            click.echo(f"Total tracks: {stats_result['tracks']['total']}")
-            click.echo(f"Complete tracks: {stats_result['tracks']['complete']}")
+            click.echo(f"Total tracks: {len(index.tracks)}")
+            click.echo(f"Total artists: {len(index.album_by_artist)}")
+            click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
+            
             click.echo("\nComponents:")
-            for component, count in stats_result['components'].items():
-                click.echo(f"- {component}: {count} files")
-            click.echo("\nArtists:")
-            for artist in sorted(stats_result['artists']):
-                click.echo(f"- {artist}")
-                for album in sorted(stats_result['albums'][artist]):
-                    click.echo(f"  - {album}")
+            for comp_name, count in sorted(component_counts.items()):
+                size_gb = component_sizes[comp_name] / (1024*1024*1024)
+                click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            
+            # Show missing component statistics if requested
+            if missing:
+                total_missing = len(index.tracks) - component_counts.get(missing, 0)
+                click.echo(f"\nTracks missing '{missing}' component:")
+                click.echo(f"Total tracks without {missing}: {total_missing}")
+                click.echo(f"Artists affected: {len(missing_artists)}")
+                click.echo(f"Albums affected: {len(missing_albums)}")
+                click.echo("\nComponents present in tracks missing this one:")
+                for comp_name, count in sorted(missing_stats.items()):
+                    click.echo(f"- {comp_name}: {count} files")
+            
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)

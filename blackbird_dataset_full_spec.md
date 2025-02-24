@@ -355,6 +355,12 @@ blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local
 blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --components vocals,mir
 
+# Clone components only for tracks missing a specific component
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
+    --components vocals,mir \
+    --missing caption
+# This will only clone vocals and mir files for tracks that don't have a caption file
+
 # Clone subset of artists (supports glob patterns)
 blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --artists "Artist1,Art*" \
@@ -370,6 +376,13 @@ blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
 ```bash
 # Show dataset statistics
 blackbird stats /path/to/dataset
+
+# Show statistics for tracks missing a specific component
+blackbird stats /path/to/dataset --missing vocals
+# This will show:
+# - Total tracks missing the component
+# - Artists and albums affected
+# - What other components these tracks have
 
 # Find incomplete tracks
 blackbird find-tracks /path/to/dataset --missing vocals
@@ -803,6 +816,12 @@ blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local
 blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --components vocals,mir
 
+# Clone components only for tracks missing a specific component
+blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
+    --components vocals,mir \
+    --missing caption
+# This will only clone vocals and mir files for tracks that don't have a caption file
+
 # Clone subset of artists (supports glob patterns)
 blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --artists "Artist1,Art*" \
@@ -818,6 +837,13 @@ blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
 ```bash
 # Show dataset statistics
 blackbird stats /path/to/dataset
+
+# Show statistics for tracks missing a specific component
+blackbird stats /path/to/dataset --missing vocals
+# This will show:
+# - Total tracks missing the component
+# - Artists and albums affected
+# - What other components these tracks have
 
 # Find incomplete tracks
 blackbird find-tracks /path/to/dataset --missing vocals

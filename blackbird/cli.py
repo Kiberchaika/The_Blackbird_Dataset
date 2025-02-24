@@ -4,9 +4,12 @@ from typing import List, Optional
 from .dataset import Dataset
 from .schema import DatasetComponentSchema
 from .sync import clone_dataset, SyncStats, configure_client
+from .index import DatasetIndex
 import json
 import sys
 import tempfile
+import shutil
+from collections import defaultdict
 
 @click.group()
 def main():
@@ -67,29 +70,78 @@ def clone(source: str, destination: str, components: Optional[str], artists: Opt
         sys.exit(1)
 
 @main.command()
-@click.argument('dataset_path', type=click.Path(exists=True))
+@click.argument('dataset_path')
 def stats(dataset_path: str):
     """Show dataset statistics.
     
-    DATASET_PATH: Path to the dataset
+    DATASET_PATH: Path to the dataset or WebDAV URL
     """
     try:
-        dataset = Dataset(Path(dataset_path))
-        # Force rebuild index to ensure we have current data
-        dataset.rebuild_index()
-        stats_result = dataset.analyze()
-        
-        click.echo("\nDataset Statistics:")
-        click.echo(f"Total tracks: {stats_result['tracks']['total']}")
-        click.echo(f"Complete tracks: {stats_result['tracks']['complete']}")
-        click.echo("\nComponents:")
-        for component, count in stats_result['components'].items():
-            click.echo(f"- {component}: {count} files")
-        click.echo("\nArtists:")
-        for artist in sorted(stats_result['artists']):
-            click.echo(f"- {artist}")
-            for album in sorted(stats_result['albums'][artist]):
-                click.echo(f"  - {album}")
+        # Check if it's a WebDAV URL
+        if dataset_path.startswith(('http://', 'https://', 'webdav://')):
+            # Create a fixed temporary directory for downloading index
+            temp_dir = '/tmp/blackbird_stats_temp'
+            temp_path = Path(temp_dir)
+            temp_path.mkdir(parents=True, exist_ok=True)
+            
+            # Configure WebDAV client
+            client = configure_client(dataset_path)
+            
+            # Download index
+            click.echo("Downloading index from remote...")
+            index_path = temp_path / '.blackbird' / 'index.pickle'
+            index_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            if not client.download_file('.blackbird/index.pickle', index_path):
+                raise ValueError("Failed to download index from remote")
+            
+            # Load and analyze index
+            index = DatasetIndex.load(index_path)
+            
+            # Count components and their sizes
+            component_counts = defaultdict(int)
+            component_sizes = defaultdict(int)
+            
+            for track in index.tracks.values():
+                for comp_name, file_path in track.files.items():
+                    component_counts[comp_name] += 1
+                    component_sizes[comp_name] += track.file_sizes[file_path]
+            
+            # Print statistics
+            click.echo("\nDataset Statistics:")
+            click.echo(f"Total tracks: {len(index.tracks)}")
+            click.echo(f"Total artists: {len(index.album_by_artist)}")
+            click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
+            
+            click.echo("\nComponents:")
+            for comp_name, count in sorted(component_counts.items()):
+                size_gb = component_sizes[comp_name] / (1024*1024*1024)
+                click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            
+            # Clean up
+            shutil.rmtree(temp_dir)
+            
+        else:
+            # Local path handling
+            if not Path(dataset_path).exists():
+                raise ValueError(f"Path '{dataset_path}' does not exist")
+                
+            dataset = Dataset(Path(dataset_path))
+            # Force rebuild index to ensure we have current data
+            dataset.rebuild_index()
+            stats_result = dataset.analyze()
+            
+            click.echo("\nDataset Statistics:")
+            click.echo(f"Total tracks: {stats_result['tracks']['total']}")
+            click.echo(f"Complete tracks: {stats_result['tracks']['complete']}")
+            click.echo("\nComponents:")
+            for component, count in stats_result['components'].items():
+                click.echo(f"- {component}: {count} files")
+            click.echo("\nArtists:")
+            for artist in sorted(stats_result['artists']):
+                click.echo(f"- {artist}")
+                for album in sorted(stats_result['albums'][artist]):
+                    click.echo(f"  - {album}")
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)
         sys.exit(1)

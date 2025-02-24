@@ -59,6 +59,12 @@ class Dataset:
             size_gb = component_sizes[comp_name] / (1024*1024*1024)
             logger.info(f"  {comp_name}: {count} files ({size_gb:.2f} GB)")
         
+        # Save the index
+        index_path = self.path / ".blackbird" / "index.pickle"
+        index_path.parent.mkdir(parents=True, exist_ok=True)
+        index.save(index_path)
+        logger.info(f"\nIndex saved to: {index_path}")
+        
         return index
         
     def validate(self) -> ValidationResult:

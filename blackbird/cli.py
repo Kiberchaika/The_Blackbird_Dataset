@@ -289,6 +289,10 @@ def reindex(dataset_path: str):
             count = component_counts[comp_name]
             size_gb = component_sizes[comp_name] / (1024*1024*1024)
             click.echo(f"  {comp_name}: {count} files ({size_gb:.2f} GB)")
+        
+        # Show where index was saved
+        index_path = Path(dataset_path) / ".blackbird" / "index.pickle"
+        click.echo(f"\nIndex saved to: {index_path}")
             
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)

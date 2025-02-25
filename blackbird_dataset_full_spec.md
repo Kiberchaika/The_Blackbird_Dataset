@@ -372,6 +372,8 @@ blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
     --offset 0
 ```
 
+You can add --profile command to output timing per operation.
+
 ### 2. Dataset Analysis
 ```bash
 # Show dataset statistics
@@ -396,11 +398,57 @@ blackbird reindex /path/to/dataset
 # Show current schema
 blackbird schema show /path/to/dataset
 
+# Discover and save schema automatically
+blackbird schema discover /path/to/dataset [--num-artists N] [--test-run]
+
 # Add new component
 blackbird schema add /path/to/dataset \
     --name lyrics \
     --pattern "*.lyrics.json"
 ```
+
+The schema discover command analyzes the dataset structure and automatically detects components based on file patterns. It:
+1. Analyzes all artists or a random subset (with `--num-artists`)
+2. Detects component patterns from file names
+3. Identifies multiple-file components (e.g., sections)
+4. Calculates statistics like track coverage
+5. Saves schema to `.blackbird/schema.json`
+
+Example output:
+```
+Analyzing artists:
+- Artist1
+- Artist2
+...
+
+Discovering schema...
+Schema discovery successful!
+
+Discovered Components:
+instrumental.mp3:
+  Pattern: *_instrumental.mp3
+  Multiple: false
+
+  Statistics:
+    Files found: 100
+    Track coverage: 100.0%
+    Unique tracks: 100
+    Has sections: false
+
+vocals_stretched_120bpm_section*.mp3:
+  Pattern: *_vocals_stretched_120bpm_section*.mp3
+  Multiple: true
+
+  Statistics:
+    Files found: 500
+    Track coverage: 50.0%
+    Unique tracks: 50
+    Has sections: true
+
+Schema saved to /path/to/dataset/.blackbird/schema.json
+```
+
+The `--test-run` flag allows previewing what would be discovered without saving the schema.
 
 ## WebDAV Server Setup
 
@@ -856,6 +904,9 @@ blackbird reindex /path/to/dataset
 ```bash
 # Show current schema
 blackbird schema show /path/to/dataset
+
+# Discover and save schema automatically
+blackbird schema discover /path/to/dataset [--num-artists N] [--test-run]
 
 # Add new component
 blackbird schema add /path/to/dataset \

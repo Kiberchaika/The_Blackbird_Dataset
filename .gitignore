@@ -1,0 +1,4 @@
+*.pyc
+blackbird_dataset.egg-info/
+test_dataset*
+*.log

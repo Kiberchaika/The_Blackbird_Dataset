@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 from .dataset import Dataset
 from .schema import DatasetComponentSchema
-from .sync import clone_dataset, SyncStats, configure_client
+from .sync import clone_dataset, SyncStats, configure_client, ProfilingStats, DatasetSync
 from .index import DatasetIndex
 import json
 import sys
@@ -11,6 +11,8 @@ import tempfile
 import shutil
 from collections import defaultdict
 import random
+from tqdm import tqdm
+import time
 
 @click.group()
 def main():
@@ -25,8 +27,9 @@ def main():
 @click.option('--artists', help='Comma-separated list of artists to clone (supports glob patterns)')
 @click.option('--proportion', type=float, help='Proportion of dataset to clone (0-1)')
 @click.option('--offset', type=int, default=0, help='Offset for proportion-based cloning')
+@click.option('--profile', is_flag=True, help='Enable performance profiling')
 def clone(source: str, destination: str, components: Optional[str], missing: Optional[str],
-         artists: Optional[str], proportion: Optional[float], offset: Optional[int]):
+         artists: Optional[str], proportion: Optional[float], offset: Optional[int], profile: bool):
     """Clone dataset from remote source.
     
     SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
@@ -59,7 +62,8 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
             missing_component=missing,
             artists=artist_list,
             proportion=proportion,
-            offset=offset
+            offset=offset,
+            enable_profiling=profile
         )
         
         # Print summary
@@ -69,6 +73,208 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
         click.echo(f"Failed: {stats.failed_files}")
         click.echo(f"Total size: {stats.total_size / (1024*1024*1024):.2f} GB")
         click.echo(f"Downloaded size: {stats.downloaded_size / (1024*1024*1024):.2f} GB")
+        
+    except Exception as e:
+        click.echo(f"Error: {str(e)}", err=True)
+        sys.exit(1)
+
+@main.command()
+@click.argument('source')
+@click.argument('destination')
+@click.option('--components', help='Comma-separated list of components to sync')
+@click.option('--missing', help='Only sync components for tracks missing this component')
+@click.option('--artists', help='Comma-separated list of artists to sync (supports glob patterns)')
+@click.option('--albums', help='Comma-separated list of albums to sync (requires --artists to be specified)')
+@click.option('--profile', is_flag=True, help='Enable performance profiling')
+def sync(source: str, destination: str, components: Optional[str], missing: Optional[str],
+         artists: Optional[str], albums: Optional[str], profile: bool):
+    """Sync dataset from remote source to local dataset.
+    
+    SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
+    DESTINATION: Local path to an existing dataset
+    """
+    # Start profiling if enabled
+    start_total = time.time_ns() if profile else 0
+    profiling = ProfilingStats() if profile else None
+    
+    try:
+        # Parse components, artists, and albums
+        component_list = components.split(',') if components else None
+        artist_list = artists.split(',') if artists else None
+        album_list = albums.split(',') if albums and artists else None
+        
+        # Configure WebDAV client
+        start_connect = time.time_ns() if profile else 0
+        client = configure_client(source)
+        if profile and profiling:
+            profiling.add_timing('connect', time.time_ns() - start_connect)
+        
+        # Create destination directory
+        dest_path = Path(destination)
+        dest_path.mkdir(parents=True, exist_ok=True)
+        
+        # Create blackbird directory
+        blackbird_dir = dest_path / ".blackbird"
+        blackbird_dir.mkdir(exist_ok=True)
+        
+        # Download schema
+        start_schema = time.time_ns() if profile else 0
+        schema_path = blackbird_dir / "schema.json"
+        temp_schema_path = blackbird_dir / "remote_schema.json"
+        
+        if not client.download_file(".blackbird/schema.json", temp_schema_path):
+            raise ValueError(f"Failed to download schema from remote. Please check if the WebDAV server at {source} is accessible.")
+        
+        # Load schemas
+        if schema_path.exists():
+            local_schema = DatasetComponentSchema.load(schema_path)
+        else:
+            local_schema = DatasetComponentSchema.create(dest_path)
+        
+        remote_schema = DatasetComponentSchema.load(temp_schema_path)
+        if profile and profiling:
+            profiling.add_timing('schema_download_and_load', time.time_ns() - start_schema)
+        
+        # Download index
+        start_index = time.time_ns() if profile else 0
+        index_path = blackbird_dir / "index.pickle"
+        
+        if not client.download_file(".blackbird/index.pickle", index_path):
+            raise ValueError(f"Failed to download index from remote. Please check if the WebDAV server at {source} is accessible.")
+        
+        # Load remote index
+        if profile and profiling:
+            profiling.add_timing('index_download_and_load', time.time_ns() - start_index)
+        
+        # Update schema
+        start_update_schema = time.time_ns() if profile else 0
+        
+        # Update local schema with requested components
+        if component_list:
+            for component in component_list:
+                if component in remote_schema.schema['components']:
+                    local_schema.schema['components'][component] = remote_schema.schema['components'][component]
+        
+        # Save the updated local schema
+        local_schema.save()
+        
+        # Clean up temporary schema file
+        temp_schema_path.unlink()
+        
+        if profile and profiling:
+            profiling.add_timing('update_schema', time.time_ns() - start_update_schema)
+            
+        # Initialize DatasetSync class
+        try:
+            dataset_sync = DatasetSync(dest_path)
+        except ValueError:
+            # If schema or index doesn't exist yet, create them
+            dataset_sync = None
+            pass
+            
+        # If we can't initialize DatasetSync, print file stats and let user confirm
+        if dataset_sync is None:
+            # Use the downloaded remote index to get file stats
+            remote_index = DatasetIndex.load(index_path)
+            
+            # Filter tracks
+            start_filter = time.time_ns() if profile else 0
+            
+            # Get files to sync
+            all_files = []  # List of (file_path, file_size) tuples
+            total_files = 0
+            total_size = 0
+            
+            # Filter tracks by artist, album, and missing component
+            tracks_to_process = {}
+            for track_path, track_info in remote_index.tracks.items():
+                # Skip if we're looking for tracks missing a component and this track has it
+                if missing and missing in track_info.files:
+                    continue
+                
+                # Skip if we're filtering by artist and this track's artist isn't in the list
+                if artist_list and track_info.artist not in artist_list:
+                    continue
+                
+                # Skip if we're filtering by album and this track's album isn't in the list
+                if album_list:
+                    album_name = Path(track_info.album_path).name
+                    if album_name not in album_list:
+                        continue
+                
+                # Add track to processing list
+                tracks_to_process[track_path] = track_info
+            
+            if profile and profiling:
+                profiling.add_timing('filter_tracks', time.time_ns() - start_filter)
+            
+            # Prepare file list
+            start_prepare = time.time_ns() if profile else 0
+            
+            # Process filtered tracks
+            for track_info in tracks_to_process.values():
+                # Check each requested component
+                target_components = component_list if component_list else local_schema.schema['components'].keys()
+                for component in target_components:
+                    if component in track_info.files:
+                        file_path = track_info.files[component]
+                        file_size = track_info.file_sizes[file_path]
+                        all_files.append((file_path, file_size))
+                        total_files += 1
+                        total_size += file_size
+            
+            if profile and profiling:
+                profiling.add_timing('prepare_file_list', time.time_ns() - start_prepare)
+            
+            # Print summary before sync
+            click.echo(f"\nFound {total_files} files to sync ({total_size / (1024*1024*1024):.2f} GB)")
+            
+            if not all_files:
+                click.echo("No files to sync. Check your filter criteria.")
+                return
+            
+            if not click.confirm("Continue with sync?"):
+                click.echo("Sync aborted.")
+                return
+
+            # Since we're setting up a new dataset, reuse the code structure above
+            # but use the DatasetSync class now
+            dataset_sync = DatasetSync(dest_path)
+
+        # Now perform the sync using DatasetSync
+        sync_stats = dataset_sync.sync(
+            client=client,
+            components=component_list if component_list else list(local_schema.schema['components'].keys()),
+            artists=artist_list,
+            albums=album_list,
+            missing_component=missing,
+            resume=True,
+            enable_profiling=profile
+        )
+        
+        # Print summary
+        click.echo("\nSync completed!")
+        click.echo(f"Total files: {sync_stats.total_files}")
+        click.echo(f"Downloaded: {sync_stats.downloaded_files}")
+        click.echo(f"Failed: {sync_stats.failed_files}")
+        click.echo(f"Skipped: {sync_stats.skipped_files}")
+        click.echo(f"Total size: {sync_stats.total_size / (1024*1024*1024):.2f} GB")
+        click.echo(f"Downloaded size: {sync_stats.downloaded_size / (1024*1024*1024):.2f} GB")
+        
+        # Print profiling stats if enabled
+        if profile and sync_stats.profiling:
+            click.echo("\nProfiling Statistics:")
+            summary = sync_stats.profiling.get_summary()
+            
+            # Sort operations by percentage of total time
+            sorted_ops = sorted(summary.items(), key=lambda x: x[1]['percentage'], reverse=True)
+            
+            for op, metrics in sorted_ops:
+                click.echo(f"  {op}:")
+                click.echo(f"    Total: {metrics['total_ms']:.2f} ms")
+                click.echo(f"    Calls: {metrics['calls']}")
+                click.echo(f"    Avg: {metrics['avg_ms']:.2f} ms per call")
+                click.echo(f"    Percentage: {metrics['percentage']:.2f}%")
         
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)

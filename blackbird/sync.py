@@ -520,9 +520,24 @@ class DatasetSync:
         existing_size = 0
         for file_path, file_size in files_to_sync.items():
             local_file = self.local_path / file_path
-            if resume and local_file.exists() and local_file.stat().st_size == file_size:
-                existing_files += 1
-                existing_size += file_size
+            if resume and local_file.exists():
+                # Check if file size matches expected size
+                try:
+                    actual_size = local_file.stat().st_size
+                    if actual_size == file_size:
+                        existing_files += 1
+                        existing_size += file_size
+                        logger.debug(f"Found existing file: {local_file} (size: {actual_size} bytes)")
+                    else:
+                        logger.debug(f"File exists but size mismatch: {local_file} (expected: {file_size}, actual: {actual_size})")
+                except Exception as e:
+                    logger.debug(f"Error checking file size for {local_file}: {e}")
+            elif resume and not local_file.exists():
+                logger.debug(f"File does not exist: {local_file}")
+        
+        # Log summary of existing files
+        if existing_files > 0:
+            logger.info(f"Found {existing_files} existing files ({existing_size / (1024*1024*1024):.2f} GB) that can be skipped")
         
         files_to_download = stats.total_files - existing_files
         size_to_download = stats.total_size - existing_size
@@ -749,14 +764,14 @@ class DatasetSync:
                         download_speed = (downloaded_bytes / (1024*1024)) / elapsed
                     else:
                         download_speed = 0
-                    
-                    pbar.update(1)
-                    pbar.set_postfix(
-                        speed=f"{download_speed:.2f} MB/s"
-                    )
-                    
-                    if enable_profiling and stats.profiling:
-                        stats.profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
+                
+                pbar.update(1)
+                pbar.set_postfix(
+                    speed=f"{download_speed:.2f} MB/s"
+                )
+                
+                if enable_profiling and stats.profiling:
+                    stats.profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
         
         if enable_profiling and stats.profiling:
             stats.profiling.add_timing('sync_total', time.time_ns() - start_total)
@@ -854,13 +869,13 @@ def clone_dataset(
     # Load schema
     schema = DatasetComponentSchema.load(schema_path)
         
-        # Download index
+    # Download index
     index_path = blackbird_dir / "index.pickle"
     if not client.download_file(".blackbird/index.pickle", index_path):
         raise ValueError(f"Failed to download index from {source_url}")
             
-        # Load index
-        index = DatasetIndex.load(index_path)
+    # Load index
+    index = DatasetIndex.load(index_path)
         
     # Initialize sync manager
     sync = DatasetSync(destination)

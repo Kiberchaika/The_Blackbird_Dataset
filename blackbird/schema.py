@@ -7,6 +7,9 @@ import pickle
 import os
 from collections import defaultdict
 import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 class SchemaDiscoveryResult:
     """Result of schema discovery."""
@@ -49,15 +52,15 @@ class ValidationResult:
 class DatasetComponentSchema:
     """Schema for dataset components and structure."""
 
-    def __init__(self, dataset_path: Path):
-        """Initialize schema manager.
+    def __init__(self, path: Path):
+        """Initialize schema with path.
         
         Args:
-            dataset_path: Path to dataset root
+            path: Path to dataset root directory
         """
-        self.dataset_path = Path(dataset_path)
-        self.schema_path = self.dataset_path / ".blackbird" / "schema.json"
-        self.schema = self._load()
+        self.path = Path(path)
+        self.schema_path = self.path / ".blackbird" / "schema.json"
+        self.schema = self._load_schema()
 
     @classmethod
     def create(cls, dataset_path: Path) -> 'DatasetComponentSchema':
@@ -79,6 +82,7 @@ class DatasetComponentSchema:
         self.schema_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.schema_path, 'w', encoding='utf-8') as f:
             json.dump(self.schema, f, indent=2, ensure_ascii=False)
+        logger.info(f"Schema saved to {self.schema_path}")
 
     def validate(self) -> ValidationResult:
         """Validate schema against dataset structure.
@@ -105,9 +109,9 @@ class DatasetComponentSchema:
             seen_patterns[pattern] = comp_name
         
         # Check directory structure
-        for root, _, files in os.walk(self.dataset_path):
+        for root, _, files in os.walk(self.path):
             try:
-                rel_path = Path(root).relative_to(self.dataset_path)
+                rel_path = Path(root).relative_to(self.path)
             except ValueError:
                 continue  # Skip root directory
                 
@@ -167,7 +171,7 @@ class DatasetComponentSchema:
             all_unmatched = set()
             
             for folder in folders:
-                folder_path = self.dataset_path / folder
+                folder_path = self.path / folder
                 if not folder_path.exists():
                     print(f"Warning: Folder {folder_path} does not exist")
                     continue
@@ -182,7 +186,7 @@ class DatasetComponentSchema:
                 all_unmatched.update(unmatched)
         else:
             # Analyze entire dataset
-            all_postfix_groups, all_base_names, all_unmatched = self._analyze_file_patterns_in_directory(str(self.dataset_path))
+            all_postfix_groups, all_base_names, all_unmatched = self._analyze_file_patterns_in_directory(str(self.path))
 
         # Prepare stats for the result
         stats = {
@@ -400,7 +404,7 @@ class DatasetComponentSchema:
             pattern = comp_info["pattern"]
             if pattern.startswith('*'):
                 # Convert glob pattern to potential companion path
-                companion = self.dataset_path / (base_path + pattern[1:])
+                companion = self.path / (base_path + pattern[1:])
                 if companion.exists() and companion != file_path:
                     companions.append(companion)
                     
@@ -418,13 +422,13 @@ class DatasetComponentSchema:
         """
         schema = DatasetComponentSchema(schema_path.parent.parent)
         schema.schema_path = schema_path
-        schema.schema = schema._load()
+        schema.schema = schema._load_schema()
         return schema
     
-    def _load(self) -> Dict[str, Any]:
-        """Load schema from file or create with defaults."""
+    def _load_schema(self) -> Dict[str, Any]:
+        """Load schema from file."""
         if self.schema_path.exists():
-            with open(self.schema_path) as f:
+            with open(self.schema_path, 'r') as f:
                 return json.load(f)
         return self._create_default_schema()
     
@@ -432,7 +436,7 @@ class DatasetComponentSchema:
         """Create default schema."""
         return {
             "version": "1.0",
-            "components": {}  # Empty components dictionary
+            "components": {}
         }
     
     def add_component(self, name: str, pattern: str, multiple: bool = False) -> ValidationResult:
@@ -526,7 +530,7 @@ class DatasetComponentSchema:
             return result
         
         # If no path provided, use the dataset path
-        validate_path = path if path else self.dataset_path
+        validate_path = path if path else self.path
         
         # Initialize component coverage tracking
         component_coverage = {
@@ -599,7 +603,7 @@ class DatasetComponentSchema:
             file_path = Path(file_path)
             
         try:
-            relative_path = file_path.relative_to(self.dataset_path)
+            relative_path = file_path.relative_to(self.path)
         except ValueError:
             # If file_path is already relative, use it as is
             relative_path = file_path
@@ -651,7 +655,7 @@ class DatasetComponentSchema:
         track_base = os.path.basename(track_path)
         
         # List all files in the track directory
-        for file_name in os.listdir(os.path.join(self.dataset_path, track_dir)):
+        for file_name in os.listdir(os.path.join(self.path, track_dir)):
             # Check if the file belongs to this track
             if file_name.startswith(track_base):
                 # Check if it matches any component pattern

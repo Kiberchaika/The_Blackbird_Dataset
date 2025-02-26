@@ -101,165 +101,126 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
 @click.option('--parallel', type=int, default=1, help='Number of parallel downloads (1 for sequential)')
 @click.option('--http2', is_flag=True, help='Use HTTP/2 for connections if available')
 @click.option('--connection-pool', type=int, default=10, help='Size of the connection pool')
+@click.option('--force-reindex', is_flag=True, help='Force reindex of local dataset before syncing')
+@click.option('--debug', is_flag=True, help='Enable debug logging')
 def sync(source: str, destination: str, components: Optional[str], missing: Optional[str],
-         artists: Optional[str], albums: Optional[str], profile: bool, parallel: int, http2: bool, connection_pool: int):
+         artists: Optional[str], albums: Optional[str], profile: bool, parallel: int, http2: bool, 
+         connection_pool: int, force_reindex: bool, debug: bool):
     """Sync dataset from remote source to local dataset.
     
-    SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
-    DESTINATION: Local path to an existing dataset
+    SOURCE: Remote dataset URL (webdav://[user:pass@]host[:port]/path)
+    DESTINATION: Local path to dataset
     """
-    # Start profiling if enabled
-    start_total = time.time_ns() if profile else 0
-    profiling = ProfilingStats() if profile else None
-    
     try:
-        # Parse components, artists, and albums
+        # Configure logging
+        if debug:
+            logging.basicConfig(level=logging.DEBUG)
+            logging.getLogger('blackbird').setLevel(logging.DEBUG)
+            click.echo("Debug logging enabled")
+        
+        # Parse components
         component_list = components.split(',') if components else None
+        
+        # Parse artists
         artist_list = artists.split(',') if artists else None
-        album_list = albums.split(',') if albums and artists else None
         
-        if album_list and not artist_list:
-            raise click.BadParameter("--albums requires --artists to be specified")
+        # Parse albums
+        album_list = albums.split(',') if albums else None
         
-        # Configure WebDAV client
-        start_connect = time.time_ns() if profile else 0
-        client = configure_client(source, use_http2=http2, connection_pool_size=connection_pool)
-        if profile and profiling:
-            profiling.add_timing('connect', time.time_ns() - start_connect)
-        
-        # Create destination directory
+        # Check if destination exists
         dest_path = Path(destination)
-        dest_path.mkdir(parents=True, exist_ok=True)
+        if not dest_path.exists():
+            click.echo(f"Destination path '{destination}' does not exist. Creating...")
+            dest_path.mkdir(parents=True, exist_ok=True)
         
-        # Create blackbird directory
+        # Check if destination is a dataset
         blackbird_dir = dest_path / ".blackbird"
-        blackbird_dir.mkdir(exist_ok=True)
-        
-        # Download schema
-        start_schema = time.time_ns() if profile else 0
         schema_path = blackbird_dir / "schema.json"
-        temp_schema_path = blackbird_dir / "remote_schema.json"
-        
-        if not client.download_file(".blackbird/schema.json", temp_schema_path):
-            raise ValueError(f"Failed to download schema from remote. Please check if the WebDAV server at {source} is accessible.")
-        
-        # Load schemas
-        if schema_path.exists():
-            local_schema = DatasetComponentSchema.load(schema_path)
-        else:
-            local_schema = DatasetComponentSchema.create(dest_path)
-        
-        remote_schema = DatasetComponentSchema.load(temp_schema_path)
-        if profile and profiling:
-            profiling.add_timing('schema_download_and_load', time.time_ns() - start_schema)
-        
-        # Download index
-        start_index = time.time_ns() if profile else 0
         index_path = blackbird_dir / "index.pickle"
         
-        if not client.download_file(".blackbird/index.pickle", index_path):
-            raise ValueError(f"Failed to download index from remote. Please check if the WebDAV server at {source} is accessible.")
+        # Configure WebDAV client
+        client = configure_client(source, use_http2=http2, connection_pool_size=connection_pool)
         
-        # Load remote index
-        if profile and profiling:
-            profiling.add_timing('index_download_and_load', time.time_ns() - start_index)
-        
-        # Update schema
-        start_update_schema = time.time_ns() if profile else 0
-        
-        # Update local schema with requested components
-        if component_list:
-            for component in component_list:
-                if component in remote_schema.schema['components']:
-                    local_schema.schema['components'][component] = remote_schema.schema['components'][component]
-        
-        # Save the updated local schema
-        local_schema.save()
-        
-        # Clean up temporary schema file
-        temp_schema_path.unlink()
-        
-        if profile and profiling:
-            profiling.add_timing('update_schema', time.time_ns() - start_update_schema)
+        # Check if we need to set up a new dataset
+        if not blackbird_dir.exists() or not schema_path.exists() or not index_path.exists():
+            click.echo("Destination is not a dataset. Setting up new dataset...")
             
-        # Initialize DatasetSync class
-        try:
+            # Create blackbird directory
+            blackbird_dir.mkdir(exist_ok=True)
+            
+            # Download schema
+            click.echo("Downloading schema...")
+            if not client.download_file(".blackbird/schema.json", schema_path):
+                raise ValueError(f"Failed to download schema from {source}")
+            
+            # Load schema
+            schema = DatasetComponentSchema.load(schema_path)
+            
+            # Download index
+            click.echo("Downloading index...")
+            if not client.download_file(".blackbird/index.pickle", index_path):
+                raise ValueError(f"Failed to download index from {source}")
+            
+            # Load index
+            index = DatasetIndex.load(index_path)
+            
+            # Create dataset sync
             dataset_sync = DatasetSync(dest_path)
-        except ValueError:
-            # If schema or index doesn't exist yet, create them
-            dataset_sync = None
-            pass
             
-        # If we can't initialize DatasetSync, print file stats and let user confirm
-        if dataset_sync is None:
-            # Use the downloaded remote index to get file stats
-            remote_index = DatasetIndex.load(index_path)
+        else:
+            # Load existing dataset
+            click.echo("Loading existing dataset...")
             
-            # Filter tracks
-            start_filter = time.time_ns() if profile else 0
+            # Force reindex if requested
+            if force_reindex:
+                click.echo("Forcing reindex of local dataset...")
+                dataset = Dataset(dest_path)
+                dataset.rebuild_index()
+                click.echo("Reindex complete.")
             
-            # Get files to sync
-            all_files = []  # List of (file_path, file_size) tuples
-            total_files = 0
-            total_size = 0
-            
-            # Filter tracks by artist, album, and missing component
-            tracks_to_process = {}
-            for track_path, track_info in remote_index.tracks.items():
-                # Skip if we're looking for tracks missing a component and this track has it
-                if missing and missing in track_info.files:
-                    continue
-                
-                # Skip if we're filtering by artist and this track's artist isn't in the list
-                if artist_list and track_info.artist not in artist_list:
-                    continue
-                
-                # Skip if we're filtering by album and this track's album isn't in the list
-                if album_list:
-                    album_name = Path(track_info.album_path).name
-                    if album_name not in album_list:
-                        continue
-                
-                # Add track to processing list
-                tracks_to_process[track_path] = track_info
-            
-            if profile and profiling:
-                profiling.add_timing('filter_tracks', time.time_ns() - start_filter)
-            
-            # Prepare file list
-            start_prepare = time.time_ns() if profile else 0
-            
-            # Process filtered tracks
-            for track_info in tracks_to_process.values():
-                # Check each requested component
-                target_components = component_list if component_list else local_schema.schema['components'].keys()
-                for component in target_components:
-                    if component in track_info.files:
-                        file_path = track_info.files[component]
-                        file_size = track_info.file_sizes[file_path]
-                        all_files.append((file_path, file_size))
-                        total_files += 1
-                        total_size += file_size
-            
-            if profile and profiling:
-                profiling.add_timing('prepare_file_list', time.time_ns() - start_prepare)
-            
-            # Print summary before sync
-            click.echo(f"\nFound {total_files} files to sync ({total_size / (1024*1024*1024):.2f} GB)")
-            
-            if not all_files:
-                click.echo("No files to sync. Check your filter criteria.")
-                return
-            
-            if not click.confirm("Continue with sync?"):
-                click.echo("Sync aborted.")
-                return
-
-            # Since we're setting up a new dataset, reuse the code structure above
-            # but use the DatasetSync class now
+            # Create dataset sync
             dataset_sync = DatasetSync(dest_path)
-
+            
+            # Verify that we have the same components
+            remote_schema_path = Path(tempfile.mkdtemp()) / "schema.json"
+            if not client.download_file(".blackbird/schema.json", remote_schema_path):
+                raise ValueError(f"Failed to download schema from {source}")
+            
+            remote_schema = DatasetComponentSchema.load(remote_schema_path)
+            local_schema = dataset_sync.schema
+            
+            # Check if components match
+            remote_components = set(remote_schema.schema['components'].keys())
+            local_components = set(local_schema.schema['components'].keys())
+            
+            if remote_components != local_components:
+                click.echo("Warning: Remote and local component schemas don't match.")
+                click.echo(f"Remote components: {sorted(remote_components)}")
+                click.echo(f"Local components: {sorted(local_components)}")
+                if not click.confirm("Continue anyway?"):
+                    click.echo("Sync aborted.")
+                    return
+            
         # Now perform the sync using DatasetSync
+        click.echo("Starting sync operation...")
+        if force_reindex:
+            click.echo("Note: Local dataset was reindexed, which should detect existing files correctly.")
+        
+        # Ensure schema has components
+        if not dataset_sync.schema.schema.get('components'):
+            click.echo("Warning: Local schema has no components defined. Copying components from remote schema.")
+            dataset_sync.schema.schema['components'] = remote_schema.schema['components']
+            dataset_sync.schema.save()
+            click.echo("Schema updated with components from remote.")
+            
+            # Rebuild index with updated schema
+            click.echo("Rebuilding index with updated schema...")
+            dataset = Dataset(dest_path)
+            dataset.rebuild_index()
+            
+            # Reload DatasetSync with updated index
+            dataset_sync = DatasetSync(dest_path)
+        
         sync_stats = dataset_sync.sync(
             client=client,
             components=component_list if component_list else list(local_schema.schema['components'].keys()),

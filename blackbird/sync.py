@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from webdav3.client import Client
 from tqdm import tqdm
 import os
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import webdav3.client as webdav
 import fnmatch
 from difflib import get_close_matches
@@ -156,6 +156,20 @@ class WebDAVClient:
         if username and password:
             self.session.auth = (username, password)
     
+    def _encode_url_path(self, path: str) -> str:
+        """Properly encode URL path with special characters.
+        
+        Args:
+            path: Path to encode
+            
+        Returns:
+            URL-encoded path with / preserved
+        """
+        # Split path by / and encode each part separately
+        parts = path.split('/')
+        encoded_parts = [quote(part, safe='') for part in parts]
+        return '/'.join(encoded_parts)
+    
     def download_file(self, remote_path: str, local_path: Path, profiling: Optional[ProfilingStats] = None) -> bool:
         """Download a file from the WebDAV server.
         
@@ -180,10 +194,13 @@ class WebDAVClient:
             if profiling:
                 profiling.add_timing('mkdir', time.time_ns() - start_mkdir)
             
+            # Properly encode the remote path for URL
+            encoded_path = self._encode_url_path(remote_path)
+            
             # Use HTTP/2 client if available and enabled
             if self.use_http2 and self.http2_client:
                 start_http_setup = time.time_ns() if profiling else 0
-                url = f"{self.base_url}/{remote_path.lstrip('/')}"
+                url = f"{self.base_url}/{encoded_path.lstrip('/')}"
                 if profiling:
                     profiling.add_timing('http_setup', time.time_ns() - start_http_setup)
                 
@@ -216,7 +233,7 @@ class WebDAVClient:
             # Use connection pooling if HTTP/2 is not available
             elif self.connection_pool_size > 0:
                 start_http_setup = time.time_ns() if profiling else 0
-                url = f"{self.base_url}/{remote_path.lstrip('/')}"
+                url = f"{self.base_url}/{encoded_path.lstrip('/')}"
                 if profiling:
                     profiling.add_timing('http_setup', time.time_ns() - start_http_setup)
                 
@@ -250,7 +267,18 @@ class WebDAVClient:
             # Fall back to standard WebDAV client
             else:
                 start_webdav_download = time.time_ns() if profiling else 0
-                self.client.download_sync(remote_path=remote_path, local_path=str(local_path))
+                # The standard WebDAV client may handle URL encoding differently
+                # We'll need to test if it needs the encoded path or the original path
+                try:
+                    self.client.download_sync(remote_path=remote_path, local_path=str(local_path))
+                except Exception as e:
+                    # If the standard client fails, try with encoded path
+                    if "#" in remote_path or "?" in remote_path or "+" in remote_path:
+                        logger.debug(f"Standard download failed, trying with encoded path: {encoded_path}")
+                        self.client.download_sync(remote_path=encoded_path, local_path=str(local_path))
+                    else:
+                        raise e
+                
                 if profiling:
                     profiling.add_timing('webdav_download_total', time.time_ns() - start_webdav_download)
                     profiling.add_timing('download_total', time.time_ns() - start_download_total)

@@ -36,7 +36,20 @@ class Dataset:
     def _rebuild_index(self) -> DatasetIndex:
         """Build a fresh index of the dataset."""
         logger.info(f"Rebuilding dataset index...")
-        logger.info(f"Schema components: {list(self._schema.schema['components'].keys())}")
+        
+        # Make sure schema is loaded
+        if not self._schema.schema or not self._schema.schema.get('components'):
+            logger.warning("Schema has no components defined. Loading schema from file if available.")
+            schema_path = self.path / ".blackbird" / "schema.json"
+            if schema_path.exists():
+                self._schema = DatasetComponentSchema.load(schema_path)
+        
+        logger.info(f"Schema components: {list(self._schema.schema.get('components', {}).keys())}")
+        
+        # If still no components, warn but continue
+        if not self._schema.schema.get('components'):
+            logger.warning("No components defined in schema. Index will be empty.")
+        
         index = DatasetIndex.build(self.path, self._schema)
         
         # Calculate component statistics

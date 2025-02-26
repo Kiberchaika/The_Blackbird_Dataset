@@ -58,6 +58,10 @@ blackbird clone webdav://server/dataset /path/to/local --components vocals,instr
 # Sync a dataset (updates existing local dataset)
 blackbird sync webdav://server/dataset /path/to/local --components vocals,instrumental --parallel 4
 
+# Clone only for tracks missing a specific component
+blackbird clone webdav://server/dataset /path/to/local --components vocals,instrumental --missing mir
+# This will only download vocals and instrumental files for tracks that don't have mir files
+
 # Show dataset statistics
 blackbird stats /path/to/dataset
 

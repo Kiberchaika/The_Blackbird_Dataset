@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Dict, Set, DefaultDict
+from typing import List, Optional, Dict, Set, DefaultDict, Tuple, Any
 import logging
 from enum import Enum
 from dataclasses import dataclass, field
@@ -13,6 +13,31 @@ from difflib import get_close_matches
 import click
 from collections import defaultdict
 import time
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+try:
+    import httpx
+    HTTPX_AVAILABLE = True
+except ImportError:
+    HTTPX_AVAILABLE = False
+
+# Import colorama for cross-platform colored terminal output
+try:
+    from colorama import init, Fore, Back, Style
+    init(autoreset=True)  # Initialize colorama with autoreset
+    COLORAMA_AVAILABLE = True
+except ImportError:
+    COLORAMA_AVAILABLE = False
+    # Create dummy color classes if colorama is not available
+    class DummyColors:
+        def __getattr__(self, name):
+            return ""
+    Fore = DummyColors()
+    Back = DummyColors()
+    Style = DummyColors()
 
 from .schema import DatasetComponentSchema
 from .index import DatasetIndex
@@ -73,12 +98,14 @@ class SyncStats:
 class WebDAVClient:
     """WebDAV client for remote dataset operations."""
     
-    def __init__(self, url: str):
+    def __init__(self, url: str, use_http2: bool = False, connection_pool_size: int = 10):
         """Initialize WebDAV client.
         
         Args:
             url: WebDAV server URL with optional credentials
                 Format: webdav://[user:pass@]host[:port]/path
+            use_http2: Whether to use HTTP/2 for connections
+            connection_pool_size: Size of the connection pool
         """
         parsed = urlparse(url)
         if parsed.scheme != 'webdav':
@@ -98,155 +125,171 @@ class WebDAVClient:
         options = {
             'webdav_hostname': self.base_url,
             'webdav_root': parsed.path or '/',
-            'webdav_timeout': 30,
-            'disable_check': True  # Add this to prevent initial check
         }
         
         if username and password:
             options['webdav_login'] = username
             options['webdav_password'] = password
             
-        self.client = webdav.Client(options)
-        logger.info(f"WebDAV client configured for server: {self.base_url}")
+        # Initialize standard WebDAV client
+        self.client = Client(options)
         
-    def check_connection(self) -> bool:
-        """Check if the WebDAV server is accessible.
+        # Set up HTTP/2 client if requested and available
+        self.use_http2 = use_http2 and HTTPX_AVAILABLE
+        self.http2_client = None
+        if self.use_http2 and HTTPX_AVAILABLE:
+            self.http2_client = httpx.Client(http2=True)
+            if username and password:
+                self.http2_client.auth = (username, password)
         
-        Returns:
-            bool: True if server is accessible
-        """
-        try:
-            import requests
-            response = requests.head(self.base_url)
-            if response.status_code == 405:  # Method not allowed is OK, server is responding
-                return True
-            return 200 <= response.status_code < 400
-        except Exception as e:
-            logger.error(f"Failed to connect to WebDAV server: {e}")
-            return False
-            
-    def list_files(self, path: str = '') -> List[Dict[str, str]]:
-        """List files in remote directory.
-        
-        Args:
-            path: Remote directory path
-            
-        Returns:
-            List of file info dictionaries with 'path' and 'size' keys
-        """
-        try:
-            if not self.check_connection():
-                raise ValueError(f"Cannot connect to WebDAV server at {self.base_url}")
-                
-            logger.info(f"Listing files in path: {path}")
-            files = self.client.list(path or '/', get_info=True)
-            logger.info(f"Raw WebDAV response: {files[:5]}")  # Log first 5 entries
-            
-            result = [
-                {
-                    'path': f['path'].lstrip('/'),  # Remove leading slash
-                    'size': int(f.get('size', 0))
-                }
-                for f in files
-                if not f['path'].endswith('/')  # Skip directories
-            ]
-            logger.info(f"Processed {len(result)} files")
-            return result
-        except Exception as e:
-            logger.error(f"Failed to list files in {path}: {e}")
-            raise
-            
+        # Set up connection pooling
+        self.connection_pool_size = connection_pool_size
+        self.session = requests.Session()
+        retries = Retry(total=5, backoff_factor=0.1)
+        adapter = HTTPAdapter(
+            pool_connections=connection_pool_size,
+            pool_maxsize=connection_pool_size,
+            max_retries=retries
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+        if username and password:
+            self.session.auth = (username, password)
+    
     def download_file(self, remote_path: str, local_path: Path, profiling: Optional[ProfilingStats] = None) -> bool:
-        """Download a single file.
+        """Download a file from the WebDAV server.
         
         Args:
-            remote_path: Path on remote server
-            local_path: Local path to save file
-            profiling: Optional profiling stats
+            remote_path: Path to the file on the server
+            local_path: Local path to save the file
+            profiling: Optional profiling stats object
             
         Returns:
-            True if download successful, False otherwise
+            True if the download was successful, False otherwise
         """
-        start_total = time.time_ns() if profiling else 0
-        
         try:
-            # Ensure parent directory exists
+            start_download_total = time.time_ns() if profiling else 0
+            
+            # Convert local_path to Path if it's a string
+            if isinstance(local_path, str):
+                local_path = Path(local_path)
+            
+            # Create parent directory if it doesn't exist
             start_mkdir = time.time_ns() if profiling else 0
             local_path.parent.mkdir(parents=True, exist_ok=True)
             if profiling:
                 profiling.add_timing('mkdir', time.time_ns() - start_mkdir)
             
-            # Try direct HTTP download first
-            try:
-                start_http = time.time_ns() if profiling else 0
-                
-                import requests
+            # Use HTTP/2 client if available and enabled
+            if self.use_http2 and self.http2_client:
+                start_http_setup = time.time_ns() if profiling else 0
                 url = f"{self.base_url}/{remote_path.lstrip('/')}"
-                auth = None
-                if hasattr(self.client.webdav, 'login') and hasattr(self.client.webdav, 'password'):
-                    auth = (self.client.webdav.login, self.client.webdav.password)
-                
                 if profiling:
-                    start_http_setup = time.time_ns()
-                    profiling.add_timing('http_setup', start_http_setup - start_http)
+                    profiling.add_timing('http_setup', time.time_ns() - start_http_setup)
                 
                 start_http_request = time.time_ns() if profiling else 0
-                response = requests.get(url, auth=auth)
-                if profiling:
-                    profiling.add_timing('http_request', time.time_ns() - start_http_request)
-                
-                if response.status_code == 200:
-                    start_write = time.time_ns() if profiling else 0
-                    local_path.write_bytes(response.content)
+                with self.http2_client.stream('GET', url) as response:
                     if profiling:
-                        profiling.add_timing('file_write', time.time_ns() - start_write)
-                    if profiling:
-                        profiling.add_timing('http_download_total', time.time_ns() - start_http)
-                    return True
-                elif response.status_code == 404:
-                    logger.error(f"File not found: {remote_path}")
-                    return False
-                else:
-                    logger.error(f"Failed to download {remote_path}: HTTP {response.status_code}")
-                    return False
+                        profiling.add_timing('http_request', time.time_ns() - start_http_request)
                     
-            except Exception as e:
-                # Fall back to WebDAV client if direct HTTP fails
-                logger.warning(f"Direct HTTP download failed, trying WebDAV: {e}")
-                try:
-                    start_webdav = time.time_ns() if profiling else 0
-                    self.client.download_sync(
-                        remote_path=remote_path,
-                        local_path=str(local_path)
-                    )
+                    if response.status_code == 200:
+                        start_file_write = time.time_ns() if profiling else 0
+                        with open(local_path, 'wb') as f:
+                            for chunk in response.iter_bytes(chunk_size=8192):
+                                f.write(chunk)
+                        if profiling:
+                            profiling.add_timing('file_write', time.time_ns() - start_file_write)
+                            profiling.add_timing('http2_download_total', time.time_ns() - start_download_total)
+                        return True
+                    else:
+                        # Only log the first few 404s, then suppress them
+                        if response.status_code != 404 or not hasattr(self, '_404_count') or self._404_count < 5:
+                            if not hasattr(self, '_404_count'):
+                                self._404_count = 0
+                            if response.status_code == 404:
+                                self._404_count += 1
+                                if self._404_count == 5:
+                                    logger.error("Suppressing further 404 error messages...")
+                            logger.error(f"HTTP/2 download failed with status {response.status_code}: {url}")
+                        return False
+            
+            # Use connection pooling if HTTP/2 is not available
+            elif self.connection_pool_size > 0:
+                start_http_setup = time.time_ns() if profiling else 0
+                url = f"{self.base_url}/{remote_path.lstrip('/')}"
+                if profiling:
+                    profiling.add_timing('http_setup', time.time_ns() - start_http_setup)
+                
+                start_http_request = time.time_ns() if profiling else 0
+                with self.session.get(url, stream=True) as response:
                     if profiling:
-                        profiling.add_timing('webdav_download', time.time_ns() - start_webdav)
-                    return True
-                except Exception as e2:
-                    logger.error(f"WebDAV download also failed: {e2}")
-                    return False
+                        profiling.add_timing('http_request', time.time_ns() - start_http_request)
+                    
+                    if response.status_code == 200:
+                        start_file_write = time.time_ns() if profiling else 0
+                        with open(local_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    f.write(chunk)
+                        if profiling:
+                            profiling.add_timing('file_write', time.time_ns() - start_file_write)
+                            profiling.add_timing('http_download_total', time.time_ns() - start_download_total)
+                        return True
+                    else:
+                        # Only log the first few 404s, then suppress them
+                        if response.status_code != 404 or not hasattr(self, '_404_count') or self._404_count < 5:
+                            if not hasattr(self, '_404_count'):
+                                self._404_count = 0
+                            if response.status_code == 404:
+                                self._404_count += 1
+                                if self._404_count == 5:
+                                    logger.error("Suppressing further 404 error messages...")
+                            logger.error(f"HTTP download failed with status {response.status_code}: {url}")
+                        return False
+            
+            # Fall back to standard WebDAV client
+            else:
+                start_webdav_download = time.time_ns() if profiling else 0
+                self.client.download_sync(remote_path=remote_path, local_path=str(local_path))
+                if profiling:
+                    profiling.add_timing('webdav_download_total', time.time_ns() - start_webdav_download)
+                    profiling.add_timing('download_total', time.time_ns() - start_download_total)
+                return True
                     
         except Exception as e:
+            # Limit logging of common errors
+            error_msg = str(e)
+            if '404' not in error_msg or not hasattr(self, '_error_count') or self._error_count < 5:
+                if not hasattr(self, '_error_count'):
+                    self._error_count = 0
+                self._error_count += 1
+                if self._error_count == 5:
+                    logger.error("Suppressing further error messages...")
             logger.error(f"Failed to download {remote_path}: {e}")
             return False
-        finally:
-            if profiling:
-                profiling.add_timing('download_total', time.time_ns() - start_total)
+    
+    def check_connection(self) -> bool:
+        """Check if the connection to the WebDAV server is working."""
+        return self.client.check_connection()
+    
+    def __getattr__(self, name):
+        """Delegate method calls to the underlying WebDAV client."""
+        return getattr(self.client, name)
 
 class DatasetSync:
-    """Manages dataset synchronization using WebDAV."""
+    """Sync manager for dataset synchronization."""
     
     def __init__(self, local_path: Path):
         """Initialize sync manager.
         
         Args:
-            local_path: Local path to sync to
+            local_path: Path to local dataset
         """
         self.local_path = Path(local_path)
-        self.schema_path = self.local_path / ".blackbird" / "schema.json"
-        self.index_path = self.local_path / ".blackbird" / "index.pickle"
+        self.blackbird_dir = self.local_path / ".blackbird"
+        self.schema_path = self.blackbird_dir / "schema.json"
+        self.index_path = self.blackbird_dir / "index.pickle"
         
-        # Load schema and index if they exist
         if self.schema_path.exists():
             self.schema = DatasetComponentSchema.load(self.schema_path)
         else:
@@ -257,13 +300,16 @@ class DatasetSync:
         else:
             raise ValueError(f"Index not found at {self.index_path}")
     
-    def configure_client(self, webdav_url: str, username: str, password: str) -> Client:
+    def configure_client(self, webdav_url: str, username: str, password: str, 
+                         use_http2: bool = False, connection_pool_size: int = 10) -> WebDAVClient:
         """Configure WebDAV client.
         
         Args:
             webdav_url: WebDAV server URL
             username: WebDAV username
             password: WebDAV password
+            use_http2: Whether to use HTTP/2 for connections
+            connection_pool_size: Size of the connection pool
             
         Returns:
             Configured WebDAV client
@@ -274,17 +320,79 @@ class DatasetSync:
             'webdav_password': password,
             'disable_check': True
         }
-        return Client(options)
+        client = WebDAVClient(
+            f"webdav://{username}:{password}@{urlparse(webdav_url).netloc}",
+            use_http2=use_http2,
+            connection_pool_size=connection_pool_size
+        )
+        return client
+    
+    def _download_file(self, client: Any, file_path: str, local_file: Path, 
+                      file_size: int, profiling: Optional[ProfilingStats] = None) -> Tuple[bool, int]:
+        """Download a single file.
+        
+        Args:
+            client: WebDAV client
+            file_path: Path to the file on the server
+            local_file: Local path to save the file
+            file_size: Expected file size
+            profiling: Optional profiling stats object
+            
+        Returns:
+            Tuple of (success, file_size)
+        """
+        start_file_sync = time.time_ns() if profiling else 0
+        
+        # Check if file exists
+        start_check_exists = time.time_ns() if profiling else 0
+        file_exists = local_file.exists() and local_file.stat().st_size == file_size
+        if profiling:
+            profiling.add_timing('check_exists', time.time_ns() - start_check_exists)
+        
+        # Skip if file exists
+        if file_exists:
+            logger.debug(f"Skipping existing file: {file_path}")
+            if profiling:
+                profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
+            return (False, file_size)  # Skipped
+        
+        try:
+            # Download file
+            start_download = time.time_ns() if profiling else 0
+            
+            # Use WebDAVClient.download_file
+            success = client.download_file(
+                remote_path=file_path,
+                local_path=local_file,
+                profiling=profiling
+            )
+            
+            if profiling:
+                profiling.add_timing('download', time.time_ns() - start_download)
+            
+            if profiling:
+                profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
+            
+            return (success, file_size)
+            
+        except Exception as e:
+            logger.error(f"Failed to sync {file_path}: {e}")
+            if profiling:
+                profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
+            return (False, 0)  # Failed
     
     def sync(
         self,
-        client: Client,
+        client: Any,
         components: List[str],
         artists: Optional[List[str]] = None,
         albums: Optional[List[str]] = None,
         missing_component: Optional[str] = None,
         resume: bool = True,
-        enable_profiling: bool = False
+        enable_profiling: bool = False,
+        parallel: int = 1,
+        use_http2: bool = False,
+        connection_pool_size: int = 10
     ) -> SyncStats:
         """Sync dataset from WebDAV server.
         
@@ -296,10 +404,17 @@ class DatasetSync:
             missing_component: Optional component that must be missing in the track
             resume: Whether to resume existing downloads
             enable_profiling: Enable performance profiling
+            parallel: Number of parallel downloads (1 for sequential)
+            use_http2: Whether to use HTTP/2 for connections
+            connection_pool_size: Size of the connection pool
             
         Returns:
             Sync statistics
         """
+        # Force enable color for tqdm
+        os.environ['FORCE_COLOR'] = '1'
+        
+        start_total_time = time.time()
         start_total = time.time_ns() if enable_profiling else 0
         
         stats = SyncStats()
@@ -358,86 +473,303 @@ class DatasetSync:
                         if missing_component and missing_component in track.files:
                             continue
                             
-                        for component in components:
-                            if component in track.files:
-                                file_path = track.files[component]
-                                file_size = track.file_sizes[file_path]
-                                files_to_sync[file_path] = file_size
-                                stats.total_files += 1
-                                stats.total_size += file_size
+                    for component in components:
+                        if component in track.files:
+                            file_path = track.files[component]
+                            file_size = track.file_sizes[file_path]
+                            files_to_sync[file_path] = file_size
+                            stats.total_files += 1
+                            stats.total_size += file_size
         
         if enable_profiling and stats.profiling:
             stats.profiling.add_timing('find_files', time.time_ns() - start_find_files)
         
-        logger.info(f"Found {stats.total_files} files to sync ({stats.total_size / (1024*1024*1024):.2f} GB)")
+        # Display download information before starting
+        logger.info(f"{Fore.CYAN}Found {Fore.YELLOW}{stats.total_files}{Fore.CYAN} files to sync ({Fore.YELLOW}{stats.total_size / (1024*1024*1024):.2f}{Fore.CYAN} GB)")
+        
+        # Check if files exist already (to estimate actual download size)
+        existing_files = 0
+        existing_size = 0
+        for file_path, file_size in files_to_sync.items():
+            local_file = self.local_path / file_path
+            if resume and local_file.exists() and local_file.stat().st_size == file_size:
+                existing_files += 1
+                existing_size += file_size
+        
+        files_to_download = stats.total_files - existing_files
+        size_to_download = stats.total_size - existing_size
+        
+        # Display download information with colors
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}Download Information:{Style.RESET_ALL}")
+        print(f"  {Fore.WHITE}Total files: {Fore.YELLOW}{stats.total_files}")
+        print(f"  {Fore.WHITE}Files to download: {Fore.GREEN}{files_to_download}")
+        print(f"  {Fore.WHITE}Files already existing: {Fore.BLUE}{existing_files}")
+        print(f"  {Fore.WHITE}Total size: {Fore.YELLOW}{stats.total_size / (1024*1024*1024):.2f} GB")
+        print(f"  {Fore.WHITE}Size to download: {Fore.GREEN}{size_to_download / (1024*1024*1024):.2f} GB")
+        if parallel > 1:
+            print(f"  {Fore.WHITE}Using {Fore.MAGENTA}{parallel} parallel download threads")
+        if use_http2:
+            print(f"  {Fore.WHITE}Using {Fore.MAGENTA}HTTP/2 protocol")
+        if connection_pool_size > 0:
+            print(f"  {Fore.WHITE}Using connection pool size: {Fore.MAGENTA}{connection_pool_size}")
+        print("")
+        
+        # Track errors to summarize later
+        error_counts = defaultdict(int)
         
         # Second pass: sync files
-        with tqdm(total=stats.total_files, desc="Syncing files") as pbar:
-            for file_path, file_size in files_to_sync.items():
-                start_file_sync = time.time_ns() if enable_profiling else 0
+        if parallel > 1:
+            # Parallel download using ThreadPoolExecutor
+            # Split files into batches for each worker
+            file_items = list(files_to_sync.items())
+            batch_size = len(file_items) // parallel
+            batches = []
+            
+            for i in range(parallel):
+                start_idx = i * batch_size
+                end_idx = start_idx + batch_size if i < parallel - 1 else len(file_items)
+                batches.append(file_items[start_idx:end_idx])
+            
+            # Create a lock for updating shared stats
+            from threading import Lock
+            stats_lock = Lock()
+            
+            # Function to process a batch with its own progress bar
+            def process_batch(batch_id, batch_files):
+                batch_stats = {
+                    "downloaded": 0,
+                    "skipped": 0,
+                    "failed": 0,
+                    "downloaded_size": 0,
+                    "start_time": time.time()
+                }
+                batch_errors = defaultdict(int)
                 
-                local_file = self.local_path / file_path
+                # Calculate total batch size in MB
+                total_batch_size_mb = sum(size for _, size in batch_files) / (1024*1024)
                 
-                # Check if file exists
-                start_check_exists = time.time_ns() if enable_profiling and stats.profiling else 0
-                file_exists = resume and local_file.exists() and local_file.stat().st_size == file_size
-                if enable_profiling and stats.profiling:
-                    stats.profiling.add_timing('check_exists', time.time_ns() - start_check_exists)
+                # Define color based on batch_id
+                colors = ['green', 'blue', 'magenta', 'cyan', 'yellow', 'red']
+                color = colors[batch_id % len(colors)]
                 
-                # Skip if file exists and resume is True
-                if file_exists:
-                    logger.debug(f"Skipping existing file: {file_path}")
-                    stats.skipped_files += 1
-                    pbar.update(1)
-                    continue
-                
-                try:
-                    # Download file
-                    start_download = time.time_ns() if enable_profiling else 0
-                    
-                    # Use WebDAVClient.download_file if available, otherwise direct download_sync
-                    if hasattr(client, 'download_file'):
-                        success = client.download_file(
-                            remote_path=file_path,
-                            local_path=local_file,
-                            profiling=stats.profiling if enable_profiling else None
-                        )
-                    else:
-                        # Create parent directory if it doesn't exist
-                        local_file.parent.mkdir(parents=True, exist_ok=True)
+                with tqdm(
+                    total=len(batch_files), 
+                    desc=f"Thread {batch_id+1}/{parallel}", 
+                    position=batch_id,
+                    leave=True,
+                    unit="file",
+                    colour=color,
+                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
+                ) as pbar:
+                    for file_path, file_size in batch_files:
+                        local_file = self.local_path / file_path
                         
-                        # Use client.download_sync directly
-                        client.download_sync(
-                            remote_path=file_path,
-                            local_path=str(local_file)
+                        try:
+                            success, actual_size = self._download_file(
+                                client, 
+                                file_path, 
+                                local_file, 
+                                file_size,
+                                stats.profiling if enable_profiling else None
+                            )
+                            
+                            if success:
+                                batch_stats["downloaded"] += 1
+                                batch_stats["downloaded_size"] += file_size
+                            elif success is False and actual_size > 0:
+                                # Skipped file
+                                batch_stats["skipped"] += 1
+                            else:
+                                # Failed file
+                                batch_stats["failed"] += 1
+                                batch_errors["download_failure"] += 1
+                                
+                        except Exception as e:
+                            error_msg = str(e)
+                            # Don't log every 404 error, just count them
+                            if "404" in error_msg:
+                                batch_errors["HTTP 404: File not found"] += 1
+                            else:
+                                # Truncate very long error messages
+                                if len(error_msg) > 100:
+                                    error_msg = error_msg[:97] + "..."
+                                batch_errors[error_msg] += 1
+                            
+                            batch_stats["failed"] += 1
+                        
+                        # Calculate current download speed in MB/s
+                        elapsed = time.time() - batch_stats["start_time"]
+                        if elapsed > 0:
+                            download_speed = (batch_stats["downloaded_size"] / (1024*1024)) / elapsed
+                        else:
+                            download_speed = 0
+                        
+                        pbar.update(1)
+                        pbar.set_postfix(
+                            speed=f"{download_speed:.2f} MB/s"
                         )
-                        success = True
+                
+                # Update global stats with batch stats
+                with stats_lock:
+                    stats.downloaded_files += batch_stats["downloaded"]
+                    stats.downloaded_size += batch_stats["downloaded_size"]
+                    stats.skipped_files += batch_stats["skipped"]
+                    stats.failed_files += batch_stats["failed"]
+                    stats.synced_files += batch_stats["downloaded"]
+                    stats.synced_size += batch_stats["downloaded_size"]
                     
+                    # Merge error counts
+                    for error, count in batch_errors.items():
+                        error_counts[error] += count
+                
+                return batch_stats
+            
+            # Create and start threads for each batch
+            with ThreadPoolExecutor(max_workers=parallel) as executor:
+                futures = []
+                for i, batch in enumerate(batches):
+                    futures.append(executor.submit(process_batch, i, batch))
+                
+                # Wait for all batches to complete
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Batch processing error: {e}")
+        else:
+            # Sequential download (original implementation)
+            with tqdm(
+                total=stats.total_files, 
+                desc="Syncing files", 
+                unit="file",
+                colour="green",
+                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
+            ) as pbar:
+                start_time = time.time()
+                downloaded_bytes = 0
+                
+                for file_path, file_size in files_to_sync.items():
+                    start_file_sync = time.time_ns() if enable_profiling else 0
+                    
+                    local_file = self.local_path / file_path
+                    
+                    # Check if file exists
+                    start_check_exists = time.time_ns() if enable_profiling and stats.profiling else 0
+                    file_exists = resume and local_file.exists() and local_file.stat().st_size == file_size
                     if enable_profiling and stats.profiling:
-                        stats.profiling.add_timing('download', time.time_ns() - start_download)
+                        stats.profiling.add_timing('check_exists', time.time_ns() - start_check_exists)
+                
+                    # Skip if file exists and resume is True
+                    if file_exists:
+                        # Uncomment for verbose logging
+                        # logger.debug(f"Skipping existing file: {file_path}")
+                        stats.skipped_files += 1
+                        pbar.update(1)
+                        continue
                     
-                    if success:
-                        stats.synced_files += 1
-                        stats.synced_size += file_size
-                        stats.downloaded_files += 1
-                        stats.downloaded_size += file_size
-                    else:
+                    try:
+                        # Download file
+                        start_download = time.time_ns() if enable_profiling else 0
+                        
+                        # Use WebDAVClient.download_file if available, otherwise direct download_sync
+                        if hasattr(client, 'download_file'):
+                            success = client.download_file(
+                                remote_path=file_path,
+                                local_path=local_file,
+                                profiling=stats.profiling if enable_profiling else None
+                            )
+                        else:
+                            # Create parent directory if it doesn't exist
+                            local_file.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            # Use client.download_sync directly
+                            client.download_sync(
+                                remote_path=file_path,
+                                local_path=str(local_file)
+                            )
+                            success = True
+                        
+                        if enable_profiling and stats.profiling:
+                            stats.profiling.add_timing('download', time.time_ns() - start_download)
+                        
+                        if success:
+                            stats.synced_files += 1
+                            stats.synced_size += file_size
+                            stats.downloaded_files += 1
+                            stats.downloaded_size += file_size
+                            downloaded_bytes += file_size
+                        else:
+                            stats.failed_files += 1
+                            error_counts["download_failure"] += 1
+                        
+                    except Exception as e:
+                        error_msg = str(e)
+                        # Don't log every 404 error, just count them
+                        if "404" in error_msg:
+                            error_counts["HTTP 404: File not found"] += 1
+                        else:
+                            # Truncate very long error messages
+                            if len(error_msg) > 100:
+                                error_msg = error_msg[:97] + "..."
+                            error_counts[error_msg] += 1
+                        
                         stats.failed_files += 1
                     
-                except Exception as e:
-                    logger.error(f"Failed to sync {file_path}: {e}")
-                    stats.failed_files += 1
-                
-                pbar.update(1)
-                
-                if enable_profiling and stats.profiling:
-                    stats.profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
+                    # Calculate current download speed in MB/s
+                    elapsed = time.time() - start_time
+                    if elapsed > 0:
+                        download_speed = (downloaded_bytes / (1024*1024)) / elapsed
+                    else:
+                        download_speed = 0
+                    
+                    pbar.update(1)
+                    pbar.set_postfix(
+                        speed=f"{download_speed:.2f} MB/s"
+                    )
+                    
+                    if enable_profiling and stats.profiling:
+                        stats.profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
         
         if enable_profiling and stats.profiling:
             stats.profiling.add_timing('sync_total', time.time_ns() - start_total)
         
-        logger.info(f"Synced {stats.synced_files} files, failed {stats.failed_files}, skipped {stats.skipped_files}")
-        return stats
+        # Calculate total elapsed time
+        total_elapsed_time = time.time() - start_total_time
+        hours, remainder = divmod(total_elapsed_time, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        
+        # Calculate download speed
+        download_speed_mbps = (stats.downloaded_size / (1024*1024)) / total_elapsed_time if total_elapsed_time > 0 else 0
+        
+        # Print detailed summary with colors
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}" + "="*50)
+        print(f"{Fore.CYAN}{Style.BRIGHT}DOWNLOAD SUMMARY")
+        print(f"{Fore.CYAN}{Style.BRIGHT}" + "="*50)
+        print(f"{Fore.WHITE}Total time: {Fore.YELLOW}{int(hours):02d}:{int(minutes):02d}:{seconds:.2f}")
+        print(f"{Fore.WHITE}Files processed: {Fore.YELLOW}{stats.total_files}")
+        print(f"{Fore.WHITE}Files downloaded: {Fore.GREEN}{stats.downloaded_files}")
+        print(f"{Fore.WHITE}Files skipped: {Fore.BLUE}{stats.skipped_files}")
+        print(f"{Fore.WHITE}Files failed: {Fore.RED}{stats.failed_files}")
+        print(f"{Fore.WHITE}Total size: {Fore.YELLOW}{stats.total_size / (1024*1024*1024):.2f} GB")
+        print(f"{Fore.WHITE}Downloaded size: {Fore.GREEN}{stats.downloaded_size / (1024*1024*1024):.2f} GB")
+        print(f"{Fore.WHITE}Average download speed: {Fore.MAGENTA}{download_speed_mbps:.2f} MB/s")
+        if parallel > 1:
+            print(f"{Fore.WHITE}Parallel threads used: {Fore.MAGENTA}{parallel}")
+        print(f"{Fore.CYAN}{Style.BRIGHT}" + "="*50)
+        
+        # Log a summary of errors instead of individual errors
+        if error_counts:
+            logger.info(f"\n{Fore.RED}Error Summary:")
+            for error, count in sorted(error_counts.items(), key=lambda x: x[1], reverse=True):
+                # Only show the top 5 errors if there are many
+                if len(error_counts) > 5 and list(error_counts.items()).index((error, count)) >= 5:
+                    remaining_errors = sum(count for _, count in list(error_counts.items())[5:])
+                    logger.info(f"  {Fore.YELLOW}... and {len(error_counts) - 5} other error types ({remaining_errors} occurrences)")
+                    break
+                logger.info(f"  {Fore.RED}{error}: {Fore.YELLOW}{count} occurrences")
+        
+        logger.info(f"{Fore.GREEN}Synced {stats.synced_files} files, {Fore.RED}failed {stats.failed_files}, {Fore.BLUE}skipped {stats.skipped_files}")
+        return stats 
 
 def clone_dataset(
     source_url: str,
@@ -448,232 +780,85 @@ def clone_dataset(
     proportion: Optional[float] = None,
     offset: int = 0,
     progress_callback = None,
-    enable_profiling: bool = False
-) -> SyncStats:
-    """Clone a remote dataset to local storage.
+    enable_profiling: bool = False,
+    parallel: int = 1,
+    use_http2: bool = False,
+    connection_pool_size: int = 10
+):
+    """Clone dataset from remote source.
     
     Args:
-        source_url: WebDAV URL of the source dataset
-        destination: Local destination path
-        components: Optional list of components to clone (default: all)
-        missing_component: Optional component that must be missing in the track
-        artists: Optional list of artists to filter by
-        proportion: Optional proportion of the dataset to clone (0-1)
-        offset: Optional offset for proportion-based cloning
-        progress_callback: Optional callback for progress updates
+        source_url: Remote dataset URL
+        destination: Local path for the cloned dataset
+        components: List of components to clone
+        missing_component: Only clone components for tracks missing this component
+        artists: List of artists to clone
+        proportion: Proportion of dataset to clone (0-1)
+        offset: Offset for proportion-based cloning
+        progress_callback: Callback function for progress updates
         enable_profiling: Enable performance profiling
+        parallel: Number of parallel downloads (1 for sequential)
+        use_http2: Whether to use HTTP/2 for connections
+        connection_pool_size: Size of the connection pool
         
     Returns:
         Sync statistics
     """
-    start_total = time.time_ns() if enable_profiling else 0
-    
-    stats = SyncStats()
-    if enable_profiling:
-        stats.enable_profiling()
-    
-    # Create destination directory if it doesn't exist
-    start_setup = time.time_ns() if enable_profiling else 0
+    # Create destination directory
     destination.mkdir(parents=True, exist_ok=True)
+    
+    # Configure WebDAV client
+    client = WebDAVClient(
+        source_url,
+        use_http2=use_http2,
+        connection_pool_size=connection_pool_size
+    )
     
     # Create blackbird directory
     blackbird_dir = destination / ".blackbird"
     blackbird_dir.mkdir(exist_ok=True)
     
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('setup_dirs', time.time_ns() - start_setup)
-    
-    # Configure WebDAV client
-    start_connect = time.time_ns() if enable_profiling else 0
-    client = configure_client(source_url)
-    
-    # Check connection
-    if not client.check_connection():
-        raise ConnectionError(f"Could not connect to WebDAV server at {source_url}")
-    
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('connect', time.time_ns() - start_connect)
-    
-    # Download schema and index files
-    start_meta = time.time_ns() if enable_profiling else 0
-    
-    logger.info("Downloading schema and index files...")
-    
     # Download schema
-    schema_local = blackbird_dir / "schema.json"
-    schema_remote = ".blackbird/schema.json"
+    schema_path = blackbird_dir / "schema.json"
+    if not client.download_file(".blackbird/schema.json", schema_path):
+        raise ValueError(f"Failed to download schema from {source_url}")
     
-    if not client.download_file(schema_remote, schema_local):
-        raise FileNotFoundError(f"Could not download schema file from {source_url}")
-    
-    # Download index
-    index_local = blackbird_dir / "index.pickle"
-    index_remote = ".blackbird/index.pickle"
-    
-    if not client.download_file(index_remote, index_local):
-        raise FileNotFoundError(f"Could not download index file from {source_url}")
-    
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('download_meta', time.time_ns() - start_meta)
-    
-    # Load schema and index
-    start_load = time.time_ns() if enable_profiling else 0
-    local_schema = DatasetComponentSchema.load(schema_local.parent)
-    remote_index = DatasetIndex.load(index_local)
-    
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('load_meta', time.time_ns() - start_load)
-    
-    # Filter tracks by criteria
-    start_filter = time.time_ns() if enable_profiling else 0
-    
-    # Build component pattern map for output
-    component_patterns = {name: info["pattern"] for name, info in local_schema.schema["components"].items()}
-    component_counts = defaultdict(int)
-    
-    # Get track list
-    all_tracks = remote_index.tracks
-    
-    # Calculate total tracks by component
-    for track in all_tracks.values():
-        for comp_name in track.files.keys():
-            component_counts[comp_name] += 1
-    
-    # Filter by criteria
-    tracks_to_process = {}
-    
-    # Apply artist filter if specified
-    if artists:
-        for artist_pattern in artists:
-            for artist in remote_index.album_by_artist.keys():
-                if fnmatch.fnmatch(artist.lower(), artist_pattern.lower()):
-                    for album in remote_index.album_by_artist[artist]:
-                        for track in remote_index.track_by_album[album]:
-                            tracks_to_process[track] = remote_index.tracks[track]
-    else:
-        tracks_to_process = all_tracks.copy()
-    
-    # Filter by missing component if specified
-    if missing_component:
-        if missing_component not in local_schema.schema["components"]:
-            raise ValueError(f"Invalid component: {missing_component}")
-            
-        tracks_to_process = {k: v for k, v in tracks_to_process.items() if missing_component not in v.files}
-    
-    # Apply proportion filter if specified
-    if proportion is not None:
-        if proportion <= 0 or proportion > 1:
-            raise ValueError("Proportion must be between 0 and 1")
-            
-        # Get sorted list of tracks
-        track_list = sorted(tracks_to_process.keys())
+    # Load schema
+    schema = DatasetComponentSchema.load(schema_path)
         
-        # Calculate slice
-        total_tracks = len(track_list)
-        slice_size = int(total_tracks * proportion)
-        end_idx = min(offset + slice_size, total_tracks)
-        
-        # Apply slice
-        track_slice = track_list[offset:end_idx]
-        tracks_to_process = {k: tracks_to_process[k] for k in track_slice}
-    
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('filter_tracks', time.time_ns() - start_filter)
-    
-    logger.info(f"Processing {len(tracks_to_process)} tracks")
-    
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('filter_tracks', time.time_ns() - start_filter)
-        
-    # Check if requested components have files
-    if components:
-        missing_files = [comp for comp in components if component_counts[comp] == 0]
-        if missing_files:
-            logger.warning(f"\nWarning: The following components have no files in the index:")
-            for comp in missing_files:
-                pattern = component_patterns.get(comp, "unknown pattern")
-                logger.warning(f"- {comp} (pattern: {pattern})")
-            if not click.confirm("\nContinue anyway?", default=False):
-                raise ValueError("Aborted due to missing files for requested components")
-    
-    # Find all files to download based on index
-    start_prepare = time.time_ns() if enable_profiling else 0
-    all_files = []  # List of (file_path, file_size) tuples
-    stats.total_files = 0
-    stats.total_size = 0
-    
-    # Process filtered tracks
-    for track_info in tracks_to_process.values():
-        # Check each requested component
-        target_components = components if components else local_schema.schema['components'].keys()
-        for component in target_components:
-            if component in track_info.files:
-                file_path = track_info.files[component]
-                file_size = track_info.file_sizes[file_path]
-                all_files.append((file_path, file_size))
-                stats.total_files += 1
-                stats.total_size += file_size
-    
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('prepare_download', time.time_ns() - start_prepare)
-    
-    # Download files with progress bar
-    with tqdm(total=stats.total_size, unit='B', unit_scale=True) as pbar:
-        for file_path, file_size in all_files:
-            start_file_download = time.time_ns() if enable_profiling else 0
+        # Download index
+    index_path = blackbird_dir / "index.pickle"
+    if not client.download_file(".blackbird/index.pickle", index_path):
+        raise ValueError(f"Failed to download index from {source_url}")
             
-            local_path = destination / file_path
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Skip if file exists with correct size
-            start_check = time.time_ns() if enable_profiling and stats.profiling else 0
-            skip_file = local_path.exists() and local_path.stat().st_size == file_size
-            if enable_profiling and stats.profiling:
-                stats.profiling.add_timing('check_exists', time.time_ns() - start_check)
-            
-            if skip_file:
-                stats.skipped_files += 1
-                pbar.update(file_size)
-                continue
-            
-            # Download file
-            start_download = time.time_ns() if enable_profiling else 0
-            if client.download_file(file_path, local_path, stats.profiling if enable_profiling else None):
-                stats.downloaded_files += 1
-                stats.downloaded_size += file_size
-                pbar.update(file_size)
-            else:
-                stats.failed_files += 1
-            
-            if enable_profiling and stats.profiling:
-                stats.profiling.add_timing('file_download', time.time_ns() - start_file_download)
+        # Load index
+        index = DatasetIndex.load(index_path)
+        
+    # Initialize sync manager
+    sync = DatasetSync(destination)
     
-    if enable_profiling and stats.profiling:
-        stats.profiling.add_timing('clone_total', time.time_ns() - start_total)
-        
-        # Print profiling stats if enabled
-        print("\nProfiling Statistics:")
-        profile_summary = stats.profiling.get_summary()
-        
-        # Sort operations by percentage of total time
-        sorted_ops = sorted(profile_summary.items(), key=lambda x: x[1]['percentage'], reverse=True)
-        
-        for op, metrics in sorted_ops:
-            print(f"  {op}:")
-            print(f"    Total: {metrics['total_ms']:.2f} ms")
-            print(f"    Calls: {metrics['calls']}")
-            print(f"    Avg: {metrics['avg_ms']:.2f} ms per call")
-            print(f"    Percentage: {metrics['percentage']:.2f}%")
-    
-    return stats
+    # Perform sync
+    return sync.sync(
+        client=client,
+        components=components or list(schema.schema["components"].keys()),
+        artists=artists,
+        missing_component=missing_component,
+        resume=True,
+        enable_profiling=enable_profiling,
+        parallel=parallel,
+        use_http2=use_http2,
+        connection_pool_size=connection_pool_size
+    )
 
-def configure_client(url: str) -> 'WebDAVClient':
-    """Configure WebDAV client for remote dataset access.
+def configure_client(url: str, use_http2: bool = False, connection_pool_size: int = 10) -> WebDAVClient:
+    """Configure WebDAV client from URL.
     
     Args:
-        url: WebDAV server URL (e.g. http://localhost:8080)
+        url: WebDAV URL (webdav://[user:pass@]host[:port]/path)
+        use_http2: Whether to use HTTP/2 for connections
+        connection_pool_size: Size of the connection pool
         
     Returns:
         Configured WebDAV client
     """
-    return WebDAVClient(url) 
+    return WebDAVClient(url, use_http2=use_http2, connection_pool_size=connection_pool_size) 

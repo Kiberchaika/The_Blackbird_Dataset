@@ -12,6 +12,11 @@ This is a tool to manage, synchronize and otherwise work with the Blackbird musi
 - Schema management for dataset structure
 - Statistics and analysis tools
 - Command-line interface for common operations
+- Performance optimizations:
+  - Parallel downloads with multi-threading
+  - HTTP/2 support for faster connections
+  - Connection pooling for reduced overhead
+  - Detailed performance profiling
 
 ## TODO
 
@@ -47,8 +52,11 @@ After installation, you can use the `blackbird` command-line tool:
 # Show help
 blackbird --help
 
-# Clone a dataset
-blackbird clone webdav://server/dataset /path/to/local --components vocals,instrumental
+# Clone a dataset (downloads from remote to a new local dataset)
+blackbird clone webdav://server/dataset /path/to/local --components vocals,instrumental --parallel 4
+
+# Sync a dataset (updates existing local dataset)
+blackbird sync webdav://server/dataset /path/to/local --components vocals,instrumental --parallel 4
 
 # Show dataset statistics
 blackbird stats /path/to/dataset
@@ -64,6 +72,55 @@ blackbird schema add /path/to/dataset component_name "*_pattern.mp3"
 
 # Rebuild index
 blackbird reindex /path/to/dataset
+```
+
+## Performance Optimizations
+
+The Blackbird Dataset Manager includes several performance optimizations for faster downloads:
+
+### Parallel Downloads
+
+Use the `--parallel` option to enable multi-threaded downloads:
+
+```bash
+# Download with 4 parallel threads
+blackbird sync webdav://server/dataset /path/to/local --parallel 4
+```
+
+### HTTP/2 Support
+
+Enable HTTP/2 for faster connections with the `--http2` flag:
+
+```bash
+# Use HTTP/2 protocol (requires httpx package)
+blackbird sync webdav://server/dataset /path/to/local --http2
+```
+
+### Connection Pooling
+
+Adjust connection pool size with the `--connection-pool` option:
+
+```bash
+# Set connection pool size to 20
+blackbird sync webdav://server/dataset /path/to/local --connection-pool 20
+```
+
+### Performance Profiling
+
+Enable performance profiling to identify bottlenecks:
+
+```bash
+# Enable profiling
+blackbird sync webdav://server/dataset /path/to/local --profile
+```
+
+### Combining Optimizations
+
+For best performance, combine all optimizations:
+
+```bash
+# Use all optimizations
+blackbird sync webdav://server/dataset /path/to/local --parallel 4 --http2 --connection-pool 20 --profile
 ```
 
 ## Development
@@ -89,6 +146,13 @@ missing_mir = dataset.find_tracks(missing=['mir'])
 
 # Sync specific components
 dataset.sync("webdav://server", components=['vocals', 'mir'])
+
+# Sync with performance optimizations
+dataset.sync("webdav://server", 
+             components=['vocals', 'mir'],
+             parallel=4,
+             use_http2=True,
+             connection_pool_size=20)
 ```
 
 ## Command Line Usage
@@ -125,6 +189,17 @@ dataset_root/
 │           └── ...
 └── ...
 ```
+
+## Performance Testing
+
+The repository includes a test script to compare different optimization strategies:
+
+```bash
+# Run performance tests
+python test_optimized_sync.py webdav://server/dataset
+```
+
+This will generate a performance comparison chart showing the impact of different optimizations.
 
 ## License
 

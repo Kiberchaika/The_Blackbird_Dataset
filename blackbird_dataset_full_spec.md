@@ -221,7 +221,13 @@ Blackbird uses WebDAV for dataset synchronization, with several key features:
 - Rationale: Safer than bi-directional sync, prevents accidental data modification
 - Each machine maintains its own subset of components
 
-#### 3.2 Schema and Index Handling During Sync
+#### 3.2 Parallel Synchronization
+- Supports concurrent downloads with configurable parallelism
+- Clone and sync operations use the same underlying sync mechanism
+- Configurable connection pool size for optimized network performance
+- Optional HTTP/2 support for improved transfer speeds
+
+#### 3.3 Schema and Index Handling During Sync
 
 When syncing from a remote source, the schema and index are handled automatically:
 

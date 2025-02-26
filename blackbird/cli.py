@@ -13,6 +13,11 @@ from collections import defaultdict
 import random
 from tqdm import tqdm
 import time
+import logging
+import os
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 @click.group()
 def main():
@@ -28,8 +33,12 @@ def main():
 @click.option('--proportion', type=float, help='Proportion of dataset to clone (0-1)')
 @click.option('--offset', type=int, default=0, help='Offset for proportion-based cloning')
 @click.option('--profile', is_flag=True, help='Enable performance profiling')
+@click.option('--parallel', type=int, default=1, help='Number of parallel downloads (1 for sequential)')
+@click.option('--http2', is_flag=True, help='Use HTTP/2 for connections if available')
+@click.option('--connection-pool', type=int, default=10, help='Size of the connection pool')
 def clone(source: str, destination: str, components: Optional[str], missing: Optional[str],
-         artists: Optional[str], proportion: Optional[float], offset: Optional[int], profile: bool):
+         artists: Optional[str], proportion: Optional[float], offset: Optional[int], profile: bool,
+         parallel: int, http2: bool, connection_pool: int):
     """Clone dataset from remote source.
     
     SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
@@ -63,7 +72,10 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
             artists=artist_list,
             proportion=proportion,
             offset=offset,
-            enable_profiling=profile
+            enable_profiling=profile,
+            parallel=parallel,
+            use_http2=http2,
+            connection_pool_size=connection_pool
         )
         
         # Print summary
@@ -86,8 +98,11 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
 @click.option('--artists', help='Comma-separated list of artists to sync (supports glob patterns)')
 @click.option('--albums', help='Comma-separated list of albums to sync (requires --artists to be specified)')
 @click.option('--profile', is_flag=True, help='Enable performance profiling')
+@click.option('--parallel', type=int, default=1, help='Number of parallel downloads (1 for sequential)')
+@click.option('--http2', is_flag=True, help='Use HTTP/2 for connections if available')
+@click.option('--connection-pool', type=int, default=10, help='Size of the connection pool')
 def sync(source: str, destination: str, components: Optional[str], missing: Optional[str],
-         artists: Optional[str], albums: Optional[str], profile: bool):
+         artists: Optional[str], albums: Optional[str], profile: bool, parallel: int, http2: bool, connection_pool: int):
     """Sync dataset from remote source to local dataset.
     
     SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
@@ -103,9 +118,12 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
         artist_list = artists.split(',') if artists else None
         album_list = albums.split(',') if albums and artists else None
         
+        if album_list and not artist_list:
+            raise click.BadParameter("--albums requires --artists to be specified")
+        
         # Configure WebDAV client
         start_connect = time.time_ns() if profile else 0
-        client = configure_client(source)
+        client = configure_client(source, use_http2=http2, connection_pool_size=connection_pool)
         if profile and profiling:
             profiling.add_timing('connect', time.time_ns() - start_connect)
         
@@ -249,7 +267,10 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
             albums=album_list,
             missing_component=missing,
             resume=True,
-            enable_profiling=profile
+            enable_profiling=profile,
+            parallel=parallel,
+            use_http2=http2,
+            connection_pool_size=connection_pool
         )
         
         # Print summary

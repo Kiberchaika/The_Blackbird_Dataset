@@ -462,7 +462,7 @@ Blackbird includes a wizard for setting up a WebDAV server on Ubuntu using nginx
 
 ```bash
 # Start WebDAV setup wizard
-blackbird setup-server /path/to/dataset
+blackbird webdav setup /path/to/dataset
 ```
 
 ### Setup Process
@@ -926,7 +926,7 @@ Blackbird includes a wizard for setting up a WebDAV server on Ubuntu using nginx
 
 ```bash
 # Start WebDAV setup wizard
-blackbird setup-server /path/to/dataset
+blackbird webdav setup /path/to/dataset
 ```
 
 ### Setup Process

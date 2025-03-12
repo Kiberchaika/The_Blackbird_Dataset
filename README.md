@@ -163,7 +163,8 @@ dataset.sync("webdav://server",
 
 ```bash
 # Initialize new dataset
-blackbird init /path/to/dataset
+blackbird schema discover /path/to/dataset
+blackbird reindex /path/to/dataset
 
 # Show dataset status
 blackbird status
@@ -173,6 +174,7 @@ blackbird schema add lyrics "*.lyrics.txt"
 
 # Sync specific components
 blackbird sync --components=vocals,mir webdav://server
+
 ```
 
 ## Dataset Structure

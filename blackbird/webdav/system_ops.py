@@ -163,4 +163,58 @@ class SystemOps:
             return {
                 "disk": False,
                 "memory": False
-            } 
+            }
+
+    @staticmethod
+    def setup_permissions_and_firewall(dataset_path: str, port: int, password: Optional[str] = None, non_interactive: bool = False) -> bool:
+        """Setup correct permissions for WebDAV access and configure firewall.
+        
+        Args:
+            dataset_path: Path to the dataset directory
+            port: Port number to configure in firewall
+            password: Optional sudo password
+            non_interactive: Whether to run in non-interactive mode
+            
+        Returns:
+            bool: True if setup successful, False otherwise
+        """
+        try:
+            # Get current username
+            current_user = os.getenv('USER') or os.getenv('USERNAME') or getpass.getuser()
+            if not current_user:
+                logger.error("Could not determine current username")
+                return False
+
+            # Add www-data to user's group
+            if not SystemOps.run_with_sudo(["usermod", "-a", "-G", current_user, "www-data"], 
+                                         password, non_interactive):
+                return False
+
+            # Give read and execute permissions to the group for home directory
+            home_dir = os.path.expanduser("~")
+            if not SystemOps.run_with_sudo(["chmod", "g+rx", home_dir], 
+                                         password, non_interactive):
+                return False
+
+            # Set ownership and permissions for dataset directory
+            if not SystemOps.run_with_sudo(["chown", "-R", f"{current_user}:{current_user}", dataset_path], 
+                                         password, non_interactive):
+                return False
+
+            if not SystemOps.run_with_sudo(["chmod", "-R", "775", dataset_path], 
+                                         password, non_interactive):
+                return False
+
+            # Configure firewall to allow WebDAV port
+            logger.info(f"Configuring firewall to allow port {port}/tcp...")
+            if not SystemOps.run_with_sudo(["ufw", "allow", f"{port}/tcp"], 
+                                         password, non_interactive):
+                logger.warning(f"Failed to configure firewall for port {port}")
+                # Don't return False here as UFW might not be installed/enabled
+
+            logger.info("Permissions and firewall setup completed successfully")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to setup permissions and firewall: {e}")
+            return False 

@@ -218,6 +218,12 @@ class WebDAVSetup:
                 logger.error("Failed to apply configuration")
                 return False
 
+            # 8. Setup permissions and configure firewall
+            logger.info("Setting up permissions and configuring firewall...")
+            if not SystemOps.setup_permissions_and_firewall(str(self.dataset_path), port=self.port, password=self.password, non_interactive=self.non_interactive):
+                logger.error("Failed to setup permissions and firewall")
+                return False
+
             click.echo("WebDAV setup completed successfully!")
             return True
             

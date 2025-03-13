@@ -765,10 +765,10 @@ class DatasetSync:
                     else:
                         download_speed = 0
                 
-                pbar.update(1)
-                pbar.set_postfix(
-                    speed=f"{download_speed:.2f} MB/s"
-                )
+                    pbar.update(1)
+                    pbar.set_postfix(
+                        speed=f"{download_speed:.2f} MB/s"
+                    )
                 
                 if enable_profiling and stats.profiling:
                     stats.profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)

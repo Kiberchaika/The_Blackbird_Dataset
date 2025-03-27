@@ -1,0 +1,46 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Debug test_add_component",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "blackbird/tests/test_schema.py::test_add_component",
+                "-v"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: Debug test_discover_schema",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "blackbird/tests/test_schema.py::test_discover_schema",
+                "-vv",
+                "-s"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: Debug test_discover_schema_real_album",
+            "type": "python",
+            "request": "launch",
+            "module": "pytest",
+            "args": [
+                "blackbird/tests/test_schema.py::test_discover_schema_real_album",
+                "-vv",
+                "-s"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+} 

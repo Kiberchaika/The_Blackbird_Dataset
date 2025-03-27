@@ -137,6 +137,24 @@ pip install -e ".[dev]"
 
 This will install development tools like pytest, black, and mypy.
 
+## Running Tests
+
+To run all tests for the Blackbird Dataset Manager:
+
+```bash
+# Run all tests
+python -m pytest
+
+# Run tests with verbose output
+python -m pytest -v
+
+# Run tests for a specific module
+python -m pytest blackbird/tests/test_locations.py
+
+# Run tests with coverage report
+python -m pytest --cov=blackbird
+```
+
 ## Quick Start
 
 ```python

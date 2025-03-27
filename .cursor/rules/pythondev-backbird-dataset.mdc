@@ -1,12 +1,13 @@
 ---
 description: Any development task on this dataset
 globs: 
+alwaysApply: false
 ---
 This is a support code for a dataset.
 
 The project is described in [README.md](mdc:README.md) and [blackbird_dataset_full_spec.md](mdc:blackbird_dataset_full_spec.md). It's still under development.
 
-On this specific machine, the source dataset we're treating as "Remote" is located at /media/k4_nas/disk1/Datasets/Music_RU/Vocal_Dereverb. Due to what this project is and how it should work, you should only access this actual dataset if you need to compare the way the WebDAV access works with the actual file system access. Otherwise, stick to only accessing it via WebDV and never modifying it at its source.
+On this specific machine, the source dataset we're treating as "Remote" is located at /media/k4_nas/disk1/Datasets/Music_Part1. Due to what this project is and how it should work, you should only access this actual dataset if you need to compare the way the WebDAV access works with the actual file system access. Otherwise, stick to only accessing it via WebDV and never modifying it at its source.
 
 Another important thing to consider is when you work with debug printing or calculating data or other data acquiring related tasks that have to do with listing or counting all the files or using RGLOB to list files, either via WebDAV or via file system access to the dataset. If it's not the mock dataset but a real dataset to which I just gave you the path, you have to know that there are thousands of artists in the root folder of the dataset. Each of them have multiple albums, each of those has a mean of 10 tracks. So if you try to print, for instance, all the artists, you will end up with a log that is at least a thousand lines long, which may be and usually will be excessive. So you have to print this and this will poison or rather pollute your context. Be mindful of the context length, be mindful of the output length, do not output more than 20 lines from each test but be sure to include all the relevant information. The main point being and I want to stress it out, do not blanket print all the artists or all the tracks that you find, etc. Be mindful of how much stuff do you print from the actual data. data.
 

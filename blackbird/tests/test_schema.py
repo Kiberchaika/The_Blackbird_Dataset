@@ -232,7 +232,7 @@ def test_discover_schema(test_dataset):
 
 def test_discover_schema_real_album():
     """Test schema discovery with a real album."""
-    dataset_path = Path("/media/k4_nas/disk1/Datasets/Music_Part1")
+    dataset_path = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_2")
     album_to_analyze = ["7Б/Молодые ветра [2001]"]
     
     print("\n=== Starting test_discover_schema_real_album ===")
@@ -283,7 +283,7 @@ def test_discover_schema_real_album():
 
 def test_validate_schema_different_album():
     """Test validating the schema against a different album."""
-    dataset_path = Path("/media/k4_nas/disk1/Datasets/Music_Part1")
+    dataset_path = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_2")
 
     print("\nStep 1: Discovering schema from reference album")
     print("Album: 7Б/Молодые ветра [2001]")
@@ -342,7 +342,7 @@ def test_validate_schema_different_album():
 
 def test_discover_schema_with_cd_album():
     """Test schema discovery with a multi-CD album."""
-    dataset_path = Path("/media/k4_nas/disk1/Datasets/Music_Part1")
+    dataset_path = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_2")
     
     # Album with CDs to analyze
     album_to_analyze = ["Alai Oli/Последний из ушедших [2022]"]

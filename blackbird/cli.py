@@ -586,6 +586,7 @@ def add(dataset_path: str, name: str, pattern: str, multiple: bool):
         
         if result.is_valid:
             click.echo(f"Successfully added component '{name}'")
+            schema.save()
         else:
             click.echo("Failed to add component:")
             for error in result.errors:

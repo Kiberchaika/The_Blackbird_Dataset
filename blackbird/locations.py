@@ -29,52 +29,61 @@ class LocationsManager:
         """Returns the absolute path to the locations configuration file."""
         return self.dataset_root_path / self.BLACKBIRD_DIR_NAME / self.LOCATIONS_FILENAME
 
-    def load_locations(self) -> None:
+    def load_locations(self) -> Dict[str, Path]:
         """
         Loads location definitions from .blackbird/locations.json.
 
         If the file doesn't exist, initializes with a default 'Main' location
         pointing to the dataset root. If the file is invalid, raises an error.
+
+        Returns:
+            A dictionary mapping location names to their resolved absolute Paths.
         """
         file_path = self.locations_file_path
-        loaded_locations: Dict[str, str] = {}
+        loaded_locations_str: Dict[str, str] = {}
 
         if file_path.exists():
             try:
                 with open(file_path, 'r') as f:
-                    loaded_locations = json.load(f)
-                if not isinstance(loaded_locations, dict):
+                    loaded_locations_str = json.load(f)
+                if not isinstance(loaded_locations_str, dict):
                     raise LocationValidationError(f"Invalid format in {file_path}. Expected a JSON object.")
-                if not loaded_locations:
-                    raise LocationValidationError(f"{file_path} is empty. Expected at least one location.")
+                # Allow empty file, will fall through to default
+                # if not loaded_locations:
+                #     raise LocationValidationError(f"{file_path} is empty. Expected at least one location.")
             except json.JSONDecodeError as e:
                 raise LocationValidationError(f"Error decoding JSON from {file_path}: {e}") from e
             except FileNotFoundError:
-                # Should not happen due to exists() check, but handle defensively
-                pass # Will fall through to default logic
-        
-        if not loaded_locations:
-            # Default case: file doesn't exist or was empty/invalid and cleared
-            print(f"Locations file not found or empty at {file_path}. Using default location 'Main': {self.dataset_root_path}")
-            loaded_locations = {self.DEFAULT_LOCATION_NAME: str(self.dataset_root_path)}
+                pass # Fall through to default logic
+
+        if not loaded_locations_str:
+            # Default case: file doesn't exist or was empty
+            print(f"Locations file not found or empty at {file_path}. Using default location '{self.DEFAULT_LOCATION_NAME}': {self.dataset_root_path}")
+            loaded_locations_str = {self.DEFAULT_LOCATION_NAME: str(self.dataset_root_path)}
             # We don't automatically save the default file here, only load it into memory
 
         # Validate and resolve paths
         validated_locations: Dict[str, Path] = {}
-        for name, path_str in loaded_locations.items():
+        for name, path_str in loaded_locations_str.items():
             if not isinstance(name, str) or not name:
                  raise LocationValidationError(f"Invalid location name found in {file_path}: {name!r}. Names must be non-empty strings.")
             if not isinstance(path_str, str):
                  raise LocationValidationError(f"Invalid path value for location '{name}' in {file_path}: {path_str!r}. Paths must be strings.")
-                 
-            path = Path(path_str)
-            # Allow loading even if path doesn't exist currently, maybe it's a remote mount
-            # Validation happens during add/operations
-            # if not path.is_dir():
-            #     raise LocationValidationError(f"Path for location '{name}' ('{path}') does not exist or is not a directory.")
-            validated_locations[name] = path.resolve()
-            
+
+            try:
+                path = Path(path_str)
+                # Resolve the path to make it absolute and canonical
+                resolved_path = path.resolve()
+                # Keep the check permissive for loading, stricter validation in add/operations
+                # if not resolved_path.is_dir():
+                #     logger.warning(f"Path for location '{name}' ('{resolved_path}') is not a directory or does not exist. It will be loaded but may cause issues later.")
+                validated_locations[name] = resolved_path
+            except Exception as e:
+                # Catch potential errors during path resolution
+                raise LocationValidationError(f"Error resolving path for location '{name}' ('{path_str}'): {e}") from e
+
         self._locations = validated_locations
+        return self._locations # Return the loaded and validated locations
 
     def save_locations(self) -> None:
         """Saves the current location definitions to .blackbird/locations.json."""

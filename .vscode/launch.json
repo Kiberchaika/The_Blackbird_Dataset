@@ -29,12 +29,12 @@
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "Python: Debug test_discover_schema_real_album",
+            "name": "Python: Debug test_schema",
             "type": "python",
             "request": "launch",
             "module": "pytest",
             "args": [
-                "blackbird/tests/test_schema.py::test_discover_schema_real_album",
+                "blackbird/tests/test_schema.py",
                 "-vv",
                 "-s"
             ],

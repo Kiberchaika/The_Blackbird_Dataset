@@ -264,7 +264,8 @@ def test_discover_schema_real_album():
         "mir.json", 
         "caption.txt",
         "vocals_stretched_120bpm_section*.mp3",
-        "vocals_stretched_120bpm_section*.json"
+        "vocals_stretched_120bpm_section*.json",
+        "mp3"
     }
     
     found_components = set(components.keys())
@@ -342,7 +343,7 @@ def test_validate_schema_different_album():
 
 def test_discover_schema_with_cd_album():
     """Test schema discovery with a multi-CD album."""
-    dataset_path = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_2")
+    dataset_path = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_3")
     
     # Album with CDs to analyze
     album_to_analyze = ["Alai Oli/Последний из ушедших [2022]"]
@@ -380,6 +381,7 @@ def test_discover_schema_with_cd_album():
     assert "vocals_noreverb.mp3" in components
     assert "vocals_stretched_120bpm_section*.mp3" in components
     assert "mir.json" in components
+    assert "mp3" in components
     
     # Check instrumental component
     instrumental = components["instrumental.mp3"]

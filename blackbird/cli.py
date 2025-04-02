@@ -15,6 +15,7 @@ from tqdm import tqdm
 import time
 import logging
 import os
+from .locations import LocationsManager, LocationValidationError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -679,6 +680,109 @@ def list():
         click.echo(f"Path: {share.path}")
         click.echo(f"Status: {'Active' if share.is_running() else 'Inactive'}")
         click.echo(f"Config: {share.config_path}")
+
+@main.group()
+def location():
+    """Manage dataset storage locations."""
+    pass
+
+def _get_locations_manager(dataset_path_str: str) -> LocationsManager:
+    """Helper to instantiate LocationsManager and handle common errors."""
+    dataset_path = Path(dataset_path_str).resolve()
+    if not dataset_path.is_dir():
+        click.echo(f"Error: Dataset path '{dataset_path}' does not exist or is not a directory.", err=True)
+        sys.exit(1)
+    
+    blackbird_dir = dataset_path / ".blackbird"
+    if not blackbird_dir.exists():
+         # Allow commands like list/add even if .blackbird doesn't exist yet, 
+         # LocationsManager handles default creation in memory
+         pass
+         # click.echo(f"Error: Dataset directory '{dataset_path}' does not seem to be initialized (missing .blackbird folder).", err=True)
+         # sys.exit(1)
+         
+    try:
+        manager = LocationsManager(dataset_path)
+        manager.load_locations() # Load existing or default
+        return manager
+    except (ValueError, LocationValidationError) as e:
+        click.echo(f"Error initializing locations manager: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred: {e}", err=True)
+        sys.exit(1)
+
+@location.command('list')
+@click.argument('dataset_path', type=click.Path(file_okay=False, resolve_path=True))
+def list_locations(dataset_path: str):
+    """List all configured storage locations."""
+    manager = _get_locations_manager(dataset_path)
+    try:
+        locations = manager.get_all_locations()
+        if not locations:
+            click.echo("No locations configured (using default 'Main').")
+            # Attempt to show default if manager loaded it
+            try:
+                main_path = manager.get_location_path(LocationsManager.DEFAULT_LOCATION_NAME)
+                click.echo(f"  {LocationsManager.DEFAULT_LOCATION_NAME}: {main_path}")
+            except KeyError:
+                 click.echo(f"  Default location '{LocationsManager.DEFAULT_LOCATION_NAME}' points to: {Path(dataset_path).resolve()}")
+            return
+
+        click.echo("Configured locations:")
+        max_name_len = max(len(name) for name in locations.keys()) if locations else 0
+        for name, path in sorted(locations.items()):
+            click.echo(f"  {name:<{max_name_len}} : {path}")
+            
+    except Exception as e:
+        click.echo(f"Error listing locations: {e}", err=True)
+        sys.exit(1)
+
+@location.command('add')
+@click.argument('dataset_path', type=click.Path(file_okay=False, resolve_path=True))
+@click.argument('name')
+@click.argument('location_path', type=click.Path(file_okay=False, resolve_path=True))
+def add_location(dataset_path: str, name: str, location_path: str):
+    """Add a new storage location."""
+    manager = _get_locations_manager(dataset_path)
+    try:
+        location_path_obj = Path(location_path)
+        manager.add_location(name, location_path_obj)
+        manager.save_locations()
+        click.echo(f"Location '{name}' added successfully, pointing to '{location_path_obj}'.")
+        click.echo(f"Configuration saved to {manager.locations_file_path}")
+    except LocationValidationError as e:
+        click.echo(f"Error adding location: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred while adding location: {e}", err=True)
+        sys.exit(1)
+
+@location.command('remove')
+@click.argument('dataset_path', type=click.Path(file_okay=False, resolve_path=True))
+@click.argument('name')
+@click.confirmation_option(prompt='Are you sure you want to remove this location? This does NOT delete data.')
+def remove_location(dataset_path: str, name: str):
+    """Remove a storage location configuration (does not delete data)."""
+    manager = _get_locations_manager(dataset_path)
+    try:
+        # Check if location exists before attempting removal
+        current_locations = manager.get_all_locations()
+        if name not in current_locations:
+             click.echo(f"Error: Location '{name}' not found.", err=True)
+             sys.exit(1)
+             
+        # Perform removal
+        manager.remove_location(name)
+        manager.save_locations()
+        click.echo(f"Location '{name}' removed successfully.")
+        click.echo(f"Configuration saved to {manager.locations_file_path}")
+    except LocationValidationError as e:
+        click.echo(f"Error removing location: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred while removing location: {e}", err=True)
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

@@ -11,6 +11,60 @@ class LocationValidationError(LocationsManagerError):
     """Error during location validation."""
     pass
 
+class SymbolicPathError(LocationsManagerError):
+    """Error during symbolic path resolution."""
+    pass
+
+def resolve_symbolic_path(symbolic_path: str, locations: Dict[str, Path]) -> Path:
+    """
+    Resolves a symbolic path (e.g., 'Main/Artist/Album/track.mp3') to an absolute path.
+
+    Args:
+        symbolic_path: The symbolic path string.
+        locations: A dictionary mapping location names to their absolute base Paths.
+
+    Returns:
+        The resolved absolute Path object.
+
+    Raises:
+        SymbolicPathError: If the symbolic path format is invalid or the location name is not found.
+        ValueError: If symbolic_path or locations is empty or invalid.
+    """
+    if not symbolic_path or not isinstance(symbolic_path, str):
+        raise ValueError("Symbolic path must be a non-empty string.")
+    if not locations or not isinstance(locations, dict):
+         raise ValueError("Locations must be a non-empty dictionary.")
+
+    parts = symbolic_path.split('/', 1)
+    if len(parts) != 2:
+        raise SymbolicPathError(f"Invalid symbolic path format: '{symbolic_path}'. Expected 'LocationName/Rest/Of/Path'.")
+
+    location_name, relative_path_str = parts
+    
+    if not location_name:
+         raise SymbolicPathError(f"Symbolic path \'{symbolic_path}\' has an empty location name part.")
+    # Check if relative path is empty, just slashes, or ends with slash - indicating a directory or invalid component
+    if not relative_path_str.strip('/') or relative_path_str.endswith('/'):
+         raise SymbolicPathError(f"Symbolic path \'{symbolic_path}\' has an invalid or directory-like relative path part: '{relative_path_str}'")
+
+    if location_name not in locations:
+        raise SymbolicPathError(f"Unknown location name '{location_name}' in symbolic path '{symbolic_path}'. Available locations: {list(locations.keys())}")
+
+    base_path = locations[location_name]
+    if not isinstance(base_path, Path):
+         # This shouldn't happen if LocationsManager is used correctly, but good to check
+         raise ValueError(f"Location \'{location_name}\' has an invalid base path type: {type(base_path)}. Expected Path.")
+         
+    # Construct the final path. Path resolution handles potential '..' etc. safely.
+    # Ensure the base path is treated as a directory.
+    try:
+        # Using / operator assumes base_path is a directory
+        absolute_path = (base_path / relative_path_str).resolve()
+        return absolute_path
+    except Exception as e:
+        # Catch potential errors during path joining or resolution
+        raise SymbolicPathError(f"Error constructing or resolving final path for symbolic path \'{symbolic_path}\': {e}") from e
+
 class LocationsManager:
     """Manages dataset storage locations defined in .blackbird/locations.json."""
 

@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 from tqdm import tqdm
 from .locations import LocationsManager
-from .locations import resolve_symbolic_path
+from .locations import resolve_symbolic_path, SymbolicPathError
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +103,30 @@ class Dataset:
         return self._schema.validate()
         
     def resolve_path(self, symbolic_path: str) -> Path:
-        """Resolves a symbolic path (e.g., 'Main/Artist/Album/track.mp3') to an absolute path."""
-        return resolve_symbolic_path(symbolic_path, self.locations.get_all_locations())
+        """Resolves a symbolic path (e.g., 'Main/Artist/Album/track.mp3') to an absolute path.
+
+        Args:
+            symbolic_path: The symbolic path string.
+
+        Returns:
+            The resolved absolute Path object.
+
+        Raises:
+            SymbolicPathError: If the path cannot be resolved.
+            ValueError: If the input is invalid.
+        """
+        # Ensure locations are loaded
+        current_locations = self.locations.get_all_locations()
+        if not current_locations:
+             # This might indicate an issue, but resolve_symbolic_path handles empty dict
+             logger.warning("Attempting to resolve path with no locations loaded.")
+             
+        try:
+            return resolve_symbolic_path(symbolic_path, current_locations)
+        except (SymbolicPathError, ValueError) as e:
+             logger.error(f"Failed to resolve symbolic path '{symbolic_path}': {e}")
+             # Re-raise the original error to propagate it
+             raise e 
         
     def find_tracks(
         self,

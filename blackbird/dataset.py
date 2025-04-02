@@ -5,6 +5,7 @@ from .index import DatasetIndex, TrackInfo
 import logging
 from collections import defaultdict
 from tqdm import tqdm
+from .locations import LocationsManager
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ class Dataset:
         self.path = Path(path)
         self._schema = DatasetComponentSchema(self.path)
         self._index = self._load_or_build_index()
+        self.locations = LocationsManager(self.path)
+        self.locations.load_locations()
         
     def _load_or_build_index(self) -> DatasetIndex:
         """Load existing index or build a new one if not found."""

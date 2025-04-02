@@ -35,31 +35,53 @@ def resolve_symbolic_path(symbolic_path: str, locations: Dict[str, Path]) -> Pat
     if not locations or not isinstance(locations, dict):
          raise ValueError("Locations must be a non-empty dictionary.")
 
-    parts = symbolic_path.split('/', 1)
-    if len(parts) != 2:
-        raise SymbolicPathError(f"Invalid symbolic path format: '{symbolic_path}'. Expected 'LocationName/Rest/Of/Path'.")
+    # Ensure locations dictionary maps name -> string path for lookup
+    locations_str_map: Dict[str, str] = {}
+    for loc_name, loc_path in locations.items():
+        if isinstance(loc_path, Path):
+            locations_str_map[loc_name] = str(loc_path)
+        elif isinstance(loc_path, str):
+            locations_str_map[loc_name] = loc_path
+        else:
+            raise ValueError(f"Location '{loc_name}' has an invalid path type: {type(loc_path)}. Expected Path or str.")
 
-    location_name, relative_path_str = parts
-    
+    parts = symbolic_path.split('/', 1)
+    if len(parts) == 1 and symbolic_path in locations_str_map:
+         location_name = symbolic_path
+         relative_path_str = "."
+    elif len(parts) == 2:
+        location_name, relative_path_str = parts
+    else:
+        raise SymbolicPathError(f"Invalid symbolic path format: '{symbolic_path}'. Expected 'LocationName/Rest/Of/Path' or just 'LocationName'.")
+
     if not location_name:
          raise SymbolicPathError(f"Symbolic path \'{symbolic_path}\' has an empty location name part.")
-    # Check if relative path is empty, just slashes, or ends with slash - indicating a directory or invalid component
-    if not relative_path_str.strip('/') or relative_path_str.endswith('/'):
+    if not relative_path_str.strip('/'): # Allow '.' for location root
          raise SymbolicPathError(f"Symbolic path \'{symbolic_path}\' has an invalid or directory-like relative path part: '{relative_path_str}'")
 
-    if location_name not in locations:
-        raise SymbolicPathError(f"Unknown location name '{location_name}' in symbolic path '{symbolic_path}'. Available locations: {list(locations.keys())}")
+    if location_name not in locations_str_map:
+        raise SymbolicPathError(f"Unknown location name '{location_name}' in symbolic path '{symbolic_path}'. Available locations: {list(locations_str_map.keys())}")
 
-    base_path = locations[location_name]
-    if not isinstance(base_path, Path):
-         # This shouldn't happen if LocationsManager is used correctly, but good to check
-         raise ValueError(f"Location \'{location_name}\' has an invalid base path type: {type(base_path)}. Expected Path.")
-         
-    # Construct the final path. Path resolution handles potential '..' etc. safely.
-    # Ensure the base path is treated as a directory.
+    base_path_str = locations_str_map[location_name]
+    try:
+        # Use strict=False initially for base path resolution, then check is_dir
+        base_path = Path(base_path_str).resolve(strict=False)
+        if not base_path.exists():
+            raise SymbolicPathError(f"Base path for location '{location_name}' ('{base_path_str}') does not exist.")
+        if not base_path.is_dir():
+            raise SymbolicPathError(f"Base path for location '{location_name}' ('{base_path}') is not a directory.")
+    except Exception as e:
+         raise SymbolicPathError(f"Error resolving or validating base path for location '{location_name}' ('{base_path_str}'): {e}") from e
+
+    # Construct the final path.
     try:
         # Using / operator assumes base_path is a directory
-        absolute_path = (base_path / relative_path_str).resolve()
+        if relative_path_str == ".":
+            absolute_path = base_path # Resolve to the location root itself
+        else:
+             # Resolve relative path against the base path
+             # resolve() handles normalization ('..') and makes it absolute
+             absolute_path = (base_path / relative_path_str).resolve()
         return absolute_path
     except Exception as e:
         # Catch potential errors during path joining or resolution
@@ -76,7 +98,7 @@ class LocationsManager:
         if not dataset_root_path or not dataset_root_path.is_dir():
             raise ValueError(f"Dataset root path '{dataset_root_path}' is not a valid directory.")
         self.dataset_root_path = dataset_root_path.resolve()
-        self._locations: Dict[str, Path] = {}
+        self._locations: Dict[str, Path] = {} # Internal storage uses Path objects
 
     @property
     def locations_file_path(self) -> Path:
@@ -113,10 +135,10 @@ class LocationsManager:
         if not loaded_locations_str:
             # Default case: file doesn't exist or was empty
             print(f"Locations file not found or empty at {file_path}. Using default location '{self.DEFAULT_LOCATION_NAME}': {self.dataset_root_path}")
-            loaded_locations_str = {self.DEFAULT_LOCATION_NAME: str(self.dataset_root_path)}
-            # We don't automatically save the default file here, only load it into memory
+            self._locations = {self.DEFAULT_LOCATION_NAME: self.dataset_root_path}
+            return self._locations # Return the default
 
-        # Validate and resolve paths
+        # Validate and resolve paths, store Path objects internally
         validated_locations: Dict[str, Path] = {}
         for name, path_str in loaded_locations_str.items():
             if not isinstance(name, str) or not name:
@@ -127,17 +149,19 @@ class LocationsManager:
             try:
                 path = Path(path_str)
                 # Resolve the path to make it absolute and canonical
-                resolved_path = path.resolve()
-                # Keep the check permissive for loading, stricter validation in add/operations
-                # if not resolved_path.is_dir():
-                #     logger.warning(f"Path for location '{name}' ('{resolved_path}') is not a directory or does not exist. It will be loaded but may cause issues later.")
+                # Use strict=False here, validation happens in add/use
+                resolved_path = path.resolve(strict=False)
+                # Basic check if it seems like a plausible path, more checks later
+                if not resolved_path.is_absolute():
+                     raise LocationValidationError(f"Path for location '{name}' ('{path_str}') did not resolve to an absolute path: {resolved_path}")
+
                 validated_locations[name] = resolved_path
             except Exception as e:
                 # Catch potential errors during path resolution
                 raise LocationValidationError(f"Error resolving path for location '{name}' ('{path_str}'): {e}") from e
 
         self._locations = validated_locations
-        return self._locations # Return the loaded and validated locations
+        return self._locations
 
     def save_locations(self) -> None:
         """Saves the current location definitions to .blackbird/locations.json."""
@@ -177,22 +201,22 @@ class LocationsManager:
 
     def get_all_locations(self) -> Dict[str, Path]:
         """
-        Gets a dictionary of all location names mapped to their absolute paths.
+        Gets a dictionary of all location names mapped to their absolute Paths.
 
         Returns:
-            A copy of the internal locations dictionary.
+            A copy of the internal locations dictionary (paths as Path objects).
         """
         if not self._locations:
              self.load_locations() # Try loading if not already loaded
         return self._locations.copy()
 
-    def add_location(self, name: str, path: Path) -> None:
+    def add_location(self, name: str, path_str: str) -> None:
         """
         Adds a new storage location. Does not save automatically.
 
         Args:
             name: The unique name for the location.
-            path: The absolute path to the location directory.
+            path_str: The absolute path string to the location directory.
 
         Raises:
             LocationValidationError: If the name or path is invalid.
@@ -200,18 +224,31 @@ class LocationsManager:
         if not isinstance(name, str) or not name.strip():
             raise LocationValidationError("Location name cannot be empty.")
         name = name.strip()
+
+        # Load current locations if not loaded
+        if not self._locations:
+            self.load_locations()
         if name in self._locations:
             raise LocationValidationError(f"Location name '{name}' already exists.")
 
-        resolved_path = path.resolve()
-        if not resolved_path.exists():
-            raise LocationValidationError(f"Path '{resolved_path}' does not exist.")
-        if not resolved_path.is_dir():
-             raise LocationValidationError(f"Path '{resolved_path}' is not a directory.")
+        if not isinstance(path_str, str) or not path_str.strip():
+            raise LocationValidationError("Location path cannot be empty.")
 
+        try:
+             path = Path(path_str)
+             # Attempt to resolve the path to ensure it's valid and exists
+             resolved_path = path.resolve(strict=True) # Use strict=True for adding
+             if not resolved_path.is_dir():
+                 raise LocationValidationError(f"Path '{resolved_path}' exists but is not a directory.")
+        except FileNotFoundError:
+             raise LocationValidationError(f"Path '{path_str}' does not exist.")
+        except Exception as e:
+             # Catch other potential errors during Path creation or resolution
+             raise LocationValidationError(f"Invalid path '{path_str}': {e}") from e
+
+        # Store the validated Path object internally
         self._locations[name] = resolved_path
         print(f"Location '{name}' added with path '{resolved_path}'. Call save_locations() to persist.")
-
 
     def remove_location(self, name: str) -> None:
         """
@@ -223,6 +260,9 @@ class LocationsManager:
         Raises:
             LocationValidationError: If the name is invalid or cannot be removed.
         """
+        if not self._locations:
+            self.load_locations()
+
         if name not in self._locations:
             raise LocationValidationError(f"Location '{name}' does not exist.")
 

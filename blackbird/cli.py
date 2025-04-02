@@ -743,18 +743,17 @@ def list_locations(dataset_path: str):
 @click.argument('name')
 @click.argument('location_path', type=click.Path(file_okay=False, resolve_path=True))
 def add_location(dataset_path: str, name: str, location_path: str):
-    """Add a new storage location."""
-    manager = _get_locations_manager(dataset_path)
+    """Adds a new storage location and saves the configuration."""
     try:
-        location_path_obj = Path(location_path)
-        manager.add_location(name, location_path_obj)
-        manager.save_locations()
-        click.echo(f"Location '{name}' added successfully, pointing to '{location_path_obj}'.")
-        click.echo(f"Configuration saved to {manager.locations_file_path}")
+        lm = _get_locations_manager(dataset_path)
+        # location_path is already resolved by click.Path, pass as string
+        lm.add_location(name, str(location_path))
+        lm.save_locations()
+        click.echo(f"Location '{name}' added successfully.")
     except LocationValidationError as e:
         click.echo(f"Error adding location: {e}", err=True)
         sys.exit(1)
-    except Exception as e:
+    except Exception as e: # Catch unexpected errors during add/save
         click.echo(f"An unexpected error occurred while adding location: {e}", err=True)
         sys.exit(1)
 
@@ -763,24 +762,17 @@ def add_location(dataset_path: str, name: str, location_path: str):
 @click.argument('name')
 @click.confirmation_option(prompt='Are you sure you want to remove this location? This does NOT delete data.')
 def remove_location(dataset_path: str, name: str):
-    """Remove a storage location configuration (does not delete data)."""
-    manager = _get_locations_manager(dataset_path)
+    """Removes a storage location and saves the configuration."""
     try:
-        # Check if location exists before attempting removal
-        current_locations = manager.get_all_locations()
-        if name not in current_locations:
-             click.echo(f"Error: Location '{name}' not found.", err=True)
-             sys.exit(1)
-             
-        # Perform removal
-        manager.remove_location(name)
-        manager.save_locations()
+        lm = _get_locations_manager(dataset_path)
+        lm.remove_location(name)
+        lm.save_locations()
         click.echo(f"Location '{name}' removed successfully.")
-        click.echo(f"Configuration saved to {manager.locations_file_path}")
     except LocationValidationError as e:
+        # Use a more specific prefix for removal errors
         click.echo(f"Error removing location: {e}", err=True)
         sys.exit(1)
-    except Exception as e:
+    except Exception as e: # Catch unexpected errors during remove/save
         click.echo(f"An unexpected error occurred while removing location: {e}", err=True)
         sys.exit(1)
 

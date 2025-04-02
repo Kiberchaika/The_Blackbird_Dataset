@@ -29,12 +29,11 @@
             "cwd": "${workspaceFolder}"
         },
         {
-            "name": "Python: Debug test_schema",
+            "name": "Python: Run All Tests",
             "type": "python",
             "request": "launch",
             "module": "pytest",
             "args": [
-                "blackbird/tests/test_schema.py",
                 "-vv",
                 "-s"
             ],

@@ -94,6 +94,11 @@ server {{
         dav_methods PUT DELETE MKCOL COPY MOVE;
         dav_ext_methods PROPFIND OPTIONS;
         
+        # Read-only access
+        limit_except GET PROPFIND OPTIONS {{
+            deny all;
+        }}
+        
         # Allow directory listing
         autoindex on;
         

@@ -33,7 +33,9 @@ class TestSystemOps:
 
     def test_check_dependencies_missing(self):
         """Test dependency checking with missing dependencies."""
-        with patch("shutil.which", return_value=None), \
+        mock_dpkg = MagicMock(stdout="", returncode=1)  # dpkg returns non-zero when package not found
+        with patch("subprocess.run", return_value=mock_dpkg), \
+             patch("shutil.which", return_value=None), \
              patch("os.path.exists", return_value=False):
             installed, missing = SystemOps.check_dependencies()
             assert installed is False

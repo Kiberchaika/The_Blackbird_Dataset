@@ -114,6 +114,7 @@ class TestWebDAVSetup:
              patch("blackbird.webdav.system_ops.SystemOps.check_dependencies", return_value=(True, [])), \
              patch("blackbird.webdav.system_ops.SystemOps.check_system_resources",
                    return_value={"disk": True, "memory": True}), \
+             patch("blackbird.webdav.system_ops.SystemOps.setup_permissions_and_firewall", return_value=True), \
              patch("blackbird.webdav.config_gen.ConfigGenerator.apply", return_value=True):
             assert setup_wizard.run() is True
 

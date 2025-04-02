@@ -136,7 +136,9 @@ class TestWebDAVSync:
              patch("blackbird.webdav.system_ops.SystemOps.check_dependencies", return_value=(True, [])), \
              patch("blackbird.webdav.system_ops.SystemOps.check_system_resources",
                    return_value={"disk": True, "memory": True}), \
+             patch("blackbird.webdav.system_ops.SystemOps.setup_permissions_and_firewall", return_value=True), \
              patch("blackbird.webdav.system_ops.SystemOps.run_with_sudo", return_value=True), \
+             patch("subprocess.run", return_value=MagicMock(returncode=0)), \
              patch("socket.socket") as mock_socket:
             
             # Mock socket for port check

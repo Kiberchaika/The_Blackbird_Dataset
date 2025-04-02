@@ -37,6 +37,7 @@ class DatasetIndex:
     track_by_album: Dict[str, Set[str]]  # album_path -> set of track_paths
     album_by_artist: Dict[str, Set[str]]  # artist_name -> set of album_paths
     total_size: int  # Total size of all indexed files
+    stats_by_location: Dict[str, Dict] = field(default_factory=dict)  # location_name -> {file_count, total_size, track_count, album_count, artist_count}
     version: str = "1.0"  # Move version with default value to the end
 
     @classmethod
@@ -184,6 +185,13 @@ class DatasetIndex:
             logger.error(f"Failed to load locations from {dataset_path / '.blackbird' / 'locations.json'}: {e}. Assuming single 'Main' location at dataset root: {dataset_path}")
             resolved_root = dataset_path.resolve()
             location_roots = {"Main": resolved_root}
+
+        # Initialize stats containers
+        location_file_counts = {name: 0 for name in location_roots}
+        location_total_sizes = {name: 0 for name in location_roots}
+        location_artists = {name: set() for name in location_roots}
+        location_albums = {name: set() for name in location_roots}
+        location_tracks = {name: set() for name in location_roots}
 
         logger.info("Finding all files across locations...")
         found_count = 0
@@ -457,6 +465,11 @@ class DatasetIndex:
                     if pbar.total > 0:
                          progress_callback(pbar.n / pbar.total)
 
+                # Update final per-location stats (track, album, artist counts)
+                location_tracks[location_name].add(symbolic_track_path)
+                location_albums[location_name].add(symbolic_album_path)
+                location_artists[location_name].add(artist)
+
         # Print detailed indexing results
         logger.info("Final Indexing Results:")
         logger.info(f"Locations processed: {effective_locations_count} / {len(location_roots)}")
@@ -469,7 +482,7 @@ class DatasetIndex:
              unique_albums = set(ap.split('/', 1)[1] for ap_set in index.album_by_artist.values() for ap in ap_set if '/' in ap)
 
         logger.info(f"Total unique albums: {len(unique_albums)}")
-        logger.info(f"Total indexed size: {index.total_size / (1024*1024*1024):.2f} GB")
+        logger.info(f"Total indexed size: {index.total_size / (1024**3):.2f} GB")
 
         logger.info("Components indexed (aggregated across locations):")
         # Sort components for consistent output
@@ -478,7 +491,7 @@ class DatasetIndex:
             for comp_name in sorted(schema.schema["components"].keys()):
                 count = component_counts.get(comp_name, 0)
                 total_indexed_files += count
-                size_gb = component_sizes.get(comp_name, 0) / (1024*1024*1024)
+                size_gb = component_sizes.get(comp_name, 0) / (1024**3)
                 comp_pattern = schema.schema['components'][comp_name].get('pattern', 'N/A')
                 logger.info(f"  - {comp_name} ({comp_pattern}): {count} files ({size_gb:.2f} GB)")
         else:
@@ -493,5 +506,16 @@ class DatasetIndex:
             for f in sorted(unmatched_files)[:10]:
                 logger.info(f"  {f}")
 
+        # Assemble the stats_by_location dictionary
+        for loc_name in location_roots.keys():
+             index.stats_by_location[loc_name] = {
+                 "file_count": location_file_counts[loc_name],
+                 "total_size": location_total_sizes[loc_name],
+                 "track_count": len(location_tracks[loc_name]),
+                 "album_count": len(location_albums[loc_name]),
+                 "artist_count": len(location_artists[loc_name]),
+             }
+
         index.last_updated = datetime.now()
-        return index # Correctly placed return statement 
+        logger.info("Index build complete.")
+        return index

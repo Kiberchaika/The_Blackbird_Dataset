@@ -65,7 +65,7 @@ class Dataset:
         if not self._schema.schema.get('components'):
             logger.warning("No components defined in schema. Index will likely be incomplete.")
         
-        index = DatasetIndex.build(self.path, self._schema, self.locations)
+        index = DatasetIndex.build(self.path, self._schema)
         
         component_counts = defaultdict(int)
         component_sizes = defaultdict(int)

@@ -656,6 +656,7 @@ class DatasetIndex:
     track_by_album: Dict[str, Set[str]]  # symbolic_album_path -> set of symbolic_track_paths
     album_by_artist: Dict[str, Set[str]]  # artist_name -> set of symbolic_album_paths
     total_size: int  # Total size of all indexed files
+    stats_by_location: Dict[str, Dict] = field(default_factory=dict) # location_name -> {file_count, total_size, track_count, album_count, artist_count}
     version: str = "1.0"
 ```
 
@@ -665,6 +666,7 @@ The index provides efficient access to:
 3. All albums (symbolic paths) by an artist.
 4. File sizes for verification during sync (keyed by symbolic file path).
 5. Component files (symbolic paths) for each track.
+6. Per-location statistics (file count, size, track/album/artist counts).
 
 ### Search Capabilities
 
@@ -1141,6 +1143,7 @@ class DatasetIndex:
     track_by_album: Dict[str, Set[str]]  # symbolic_album_path -> set of symbolic_track_paths
     album_by_artist: Dict[str, Set[str]]  # artist_name -> set of symbolic_album_paths
     total_size: int  # Total size of all indexed files
+    stats_by_location: Dict[str, Dict] = field(default_factory=dict) # location_name -> {file_count, total_size, track_count, album_count, artist_count}
     version: str = "1.0"
 ```
 
@@ -1150,6 +1153,7 @@ The index provides efficient access to:
 3. All albums (symbolic paths) by an artist.
 4. File sizes for verification during sync (keyed by symbolic file path).
 5. Component files (symbolic paths) for each track.
+6. Per-location statistics (file count, size, track/album/artist counts).
 
 ### Search Capabilities
 
@@ -1591,277 +1595,13 @@ def setup_server(path):
     """Setup WebDAV server for dataset"""
     wizard = ServerSetupWizard(path)
     wizard.run()
-```
-
-Test coverage needed:
-1. CLI command testing
-2. WebDAV server setup testing
-3. Server configuration validation
-4. Connection testing
-5. Security testing 
-
-## Dataset Indexing
-
-Blackbird maintains a lightweight, fast index of the dataset for efficient operations. The index is stored in `.blackbird/index.pickle` using Python's pickle format with protocol 5 for optimal performance.
-
-### Index Structure (with Symbolic Paths)
-
-```python
-@dataclass
-class TrackInfo:
-    """Track information in the index."""
-    track_path: str      # Symbolic path identifying the track (Location/Artist/Album/[CD]/BaseName)
-    artist: str         # Artist name
-    album_path: str     # Symbolic path to album (Location/Artist/Album)
-    cd_number: Optional[str]  # CD number if present
-    base_name: str      # Track name without component suffixes
-    files: Dict[str, str]  # component_name -> symbolic_file_path mapping (Location/Artist/.../file.ext)
-    file_sizes: Dict[str, int]  # symbolic_file_path -> size in bytes
-
-@dataclass
-class DatasetIndex:
-    """Main index structure."""
-    last_updated: datetime
-    tracks: Dict[str, TrackInfo]  # symbolic_track_path -> TrackInfo
-    track_by_album: Dict[str, Set[str]]  # symbolic_album_path -> set of symbolic_track_paths
-    album_by_artist: Dict[str, Set[str]]  # artist_name -> set of symbolic_album_paths
-    total_size: int  # Total size of all indexed files
-    version: str = "1.0"
-```
-
-The index provides efficient access to:
-1. Track information by its unique symbolic path.
-2. All tracks (symbolic paths) in an album (identified by its symbolic path).
-3. All albums (symbolic paths) by an artist.
-4. File sizes for verification during sync (keyed by symbolic file path).
-5. Component files (symbolic paths) for each track.
-
-### Search Capabilities
-
-The index supports several search operations. Note that album and track paths returned or used in filtering are *symbolic*.
-
-1. **Artist Search**
-   ```python
-   # Case-insensitive search by default
-   artists = index.search_by_artist("artist")
-
-   # Case-sensitive search
-   artists = index.search_by_artist("Artist1", case_sensitive=True)
-   ```
-
-2. **Album Search**
-   ```python
-   # Search all albums (returns symbolic album paths)
-   albums = index.search_by_album("Album")
-
-   # Search albums by specific artist
-   albums = index.search_by_album("Album", artist="Artist1")
-   ```
-
-3. **Track Search**
-   ```python
-   # Search all tracks by base name (returns TrackInfo objects)
-   tracks = index.search_by_track("Track")
-
-   # Search with filters (artist is exact, album is symbolic path)
-   tracks = index.search_by_track("Track",
-                                artist="Artist1",
-                                album="LocationName/Artist1/Album1")
-   ```
-
-### Index Building
-
-The index is built by scanning all configured dataset locations and grouping files by their components:
-
-1. **Location Scanning**
-   - Iterates through each location defined in `.blackbird/locations.json` (or the default 'Main' location).
-   - Uses `os.walk` for efficient directory traversal within each location.
-   - Shows real-time progress with tqdm.
-   - Counts files and calculates total size across all locations.
-
-2. **Component Matching & Base Name Extraction**
-   - Matches files against component patterns defined in the schema.
-   - Extracts the base track name by removing component suffixes.
-
-3. **Symbolic Path Generation**
-   - Creates symbolic paths by prepending the location name to the relative path within that location (e.g., `Main/Artist/Album/track_comp.ext`).
-
-4. **Track Organization**
-   - Groups related component files (represented by symbolic paths) under a unique symbolic track path (`Location/Artist/Album/[CD]/BaseName`).
-   - Stores `TrackInfo` objects keyed by their symbolic track path.
-   - Maintains mappings from artists to symbolic album paths and from symbolic album paths to symbolic track paths.
-   - Stores file sizes keyed by their symbolic file path.
-
-Example index building:
-```python
-# Build index with progress tracking (scans all locations)
-index = DatasetIndex.build(dataset_root_path, schema)
-
-# Save index
-index.save(index_path)
-```
-
-### Synchronization with Index
-
-The sync process uses the index for efficient file transfer:
-
-1. **Component Selection**
-   ```python
-   sync = DatasetSync(local_path)
-   stats = sync.sync(
-       client,
-       components=["vocals", "mir"],
-       artists=["Artist1"],
-       resume=True
-   )
-   ```
-
-2. **File Discovery**
-   - Uses index instead of scanning remote server
-   - Knows exact files and sizes upfront
-   - Can calculate total size before starting
-
-3. **Progress Tracking**
-   ```python
-   @dataclass
-   class SyncStats:
-       total_files: int = 0
-       synced_files: int = 0
-       failed_files: int = 0
-       skipped_files: int = 0
-       total_size: int = 0
-       synced_size: int = 0
-   ```
-
-4. **Resume Support**
-   - Verifies existing files by size
-   - Skips correctly synced files
-   - Tracks sync progress
-
-5. **Error Handling**
-   - Validates file sizes after download
-   - Removes failed downloads
-   - Provides detailed error reporting
-
-Example sync output:
-```
-Collecting files to sync...
-Found 1000 files to sync (50.5 GB)
-Syncing files: 100% |████████| 1000/1000 [02:30<00:00, 6.67 files/s]
-
-Sync completed!
-Total files: 1000
-Successfully synced: 950
-Failed: 10
-Skipped: 40
-Total size: 50.5 GB
-Synced size: 48.2 GB
-```
-
-### Remote Dataset Initialization
-
-When connecting to a remote dataset, Blackbird follows a strict initialization sequence:
-
-1. **Schema Download**
-   ```
-   Downloading schema from remote...
-   Schema downloaded successfully.
-   Available components:
-   - instrumental (*.instrumental.mp3)
-   - vocals_noreverb (*.vocals_noreverb.mp3)
-   - mir (*.mir.json)
-   ...
-   ```
-
-2. **Index Download**
-   ```
-   Downloading dataset index...
-   Index downloaded successfully.
-   Total tracks: 1000
-   Total artists: 50
-   ```
-
-3. **Component Validation**
-   - Before starting any sync/clone operation, validate requested components
-   - If invalid components are requested, show available ones
-   - Suggest similar component names using fuzzy matching
-   ```
-   Error: Unknown component 'vocal'
-   Available components:
-   - vocals_noreverb
-   - vocals_stretched
-   Did you mean 'vocals_noreverb'?
-   ```
-
-4. **Artist Validation**
-   - Validate requested artists against the index
-   - Show suggestions for similar artist names
-   ```
-   Error: Unknown artist 'Zemfira'
-   Did you mean 'Земфира'?
-   ```
-
-This validation sequence ensures:
-1. Users are aware of available components before sync starts
-2. Typos in component or artist names are caught early
-3. Helpful suggestions guide users to correct names
-4. No unnecessary network traffic for invalid requests
-
-## Command Line Interface
-
-Blackbird provides a comprehensive CLI for dataset operations after pip installation:
-
-```bash
-# Install package
-pip install blackbird-dataset
-
-# Basic usage
-blackbird --help
-```
-
-### 1. Dataset Cloning
-```bash
-# Clone entire dataset
-blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local
-
-# Clone specific components
-blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
-    --components vocals,mir
-
-# Clone components only for tracks missing a specific component
-blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
-    --components vocals,mir \
-    --missing caption
-# This will only clone vocals and mir files for tracks that don't have a caption file
-
-# Clone subset of artists (supports glob patterns)
-blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
-    --artists "Artist1,Art*" \
-    --components vocals
-
-# Clone proportion of dataset
-blackbird clone webdav://192.168.1.100:8080/dataset /path/to/local \
-    --proportion 0.1 \
-    --offset 0
-```
-
-### 2. Dataset Analysis
-```bash
-# Show dataset statistics
-blackbird stats /path/to/dataset
-
-# Show statistics for tracks missing a specific component
-blackbird stats /path/to/dataset --missing vocals
-# This will show:
-# - Total tracks missing the component
-# - Artists and albums affected
-# - What other components these tracks have
 
 # Find incomplete tracks
 blackbird find-tracks /path/to/dataset --missing vocals
 
 # Rebuild dataset index
 blackbird reindex /path/to/dataset
+
 ```
 
 ### 3. Schema Management

@@ -168,7 +168,7 @@ def test_dir(tmp_path):
 def mock_webdav_client():
     """Create a mock WebDAV client."""
     client = MagicMock()
-    client.download_sync = MagicMock()
+    client.download_file = MagicMock()
     return client
 
 def test_sync_initialization(test_dir):
@@ -189,7 +189,7 @@ def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
     sync = DatasetSync(test_dir)
     
     # Mock successful downloads
-    def mock_download(remote_path, local_path):
+    def mock_download(remote_path, local_path, **kwargs):
         # Create file with correct size based on the track and file
         path = Path(local_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,8 +206,10 @@ def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
         
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
+        
+        return True # Explicitly return True on success
     
-    mock_webdav_client.download_sync.side_effect = mock_download
+    mock_webdav_client.download_file.side_effect = mock_download
     
     # Sync instrumental files
     stats = sync.sync(
@@ -221,8 +223,8 @@ def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
     assert stats.failed_files == 0
     
     # Verify the correct files were synced
-    assert mock_webdav_client.download_sync.call_count == 2
-    calls = mock_webdav_client.download_sync.call_args_list
+    assert mock_webdav_client.download_file.call_count == 2
+    calls = mock_webdav_client.download_file.call_args_list
     assert any("Track1_instrumental.mp3" in str(call) for call in calls)
     assert any("Track2_instrumental.mp3" in str(call) for call in calls)
 
@@ -237,7 +239,7 @@ def test_sync_resume(test_dir, mock_webdav_client):
         f.write(b'0' * 1000000)  # Size from track1's file_sizes
     
     # Mock successful downloads
-    def mock_download(remote_path, local_path):
+    def mock_download(remote_path, local_path, **kwargs):
         # Create file with correct size based on the track and file
         path = Path(local_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +257,7 @@ def test_sync_resume(test_dir, mock_webdav_client):
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
     
-    mock_webdav_client.download_sync.side_effect = mock_download
+    mock_webdav_client.download_file.side_effect = mock_download
     
     # Sync with resume
     stats = sync.sync(
@@ -275,7 +277,7 @@ def test_sync_error_handling(test_dir, mock_webdav_client):
     sync = DatasetSync(test_dir)
     
     # Mock failed download
-    def mock_download(remote_path, local_path):
+    def mock_download(remote_path, local_path, **kwargs):
         if "Track1" in remote_path:
             raise Exception("Download failed")
         
@@ -296,7 +298,7 @@ def test_sync_error_handling(test_dir, mock_webdav_client):
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
     
-    mock_webdav_client.download_sync.side_effect = mock_download
+    mock_webdav_client.download_file.side_effect = mock_download
     
     # Sync with some failures
     stats = sync.sync(

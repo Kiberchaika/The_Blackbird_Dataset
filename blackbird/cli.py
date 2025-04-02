@@ -37,9 +37,10 @@ def main():
 @click.option('--parallel', type=int, default=1, help='Number of parallel downloads (1 for sequential)')
 @click.option('--http2', is_flag=True, help='Use HTTP/2 for connections if available')
 @click.option('--connection-pool', type=int, default=10, help='Size of the connection pool')
+@click.option('--target-location', default='Main', help='Name of the location to clone files into')
 def clone(source: str, destination: str, components: Optional[str], missing: Optional[str],
          artists: Optional[str], proportion: Optional[float], offset: Optional[int], profile: bool,
-         parallel: int, http2: bool, connection_pool: int):
+         parallel: int, http2: bool, connection_pool: int, target_location: str):
     """Clone dataset from remote source.
     
     SOURCE: Remote dataset URL (e.g. webdav://server/dataset)
@@ -76,7 +77,8 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
             enable_profiling=profile,
             parallel=parallel,
             use_http2=http2,
-            connection_pool_size=connection_pool
+            connection_pool_size=connection_pool,
+            target_location=target_location
         )
         
         # Print summary
@@ -104,9 +106,10 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
 @click.option('--connection-pool', type=int, default=10, help='Size of the connection pool')
 @click.option('--force-reindex', is_flag=True, help='Force reindex of local dataset before syncing')
 @click.option('--debug', is_flag=True, help='Enable debug logging')
+@click.option('--target-location', default='Main', help='Name of the location to sync files into')
 def sync(source: str, destination: str, components: Optional[str], missing: Optional[str],
          artists: Optional[str], albums: Optional[str], profile: bool, parallel: int, http2: bool, 
-         connection_pool: int, force_reindex: bool, debug: bool):
+         connection_pool: int, force_reindex: bool, debug: bool, target_location: str):
     """Sync dataset from remote source to local dataset.
     
     SOURCE: Remote dataset URL (webdav://[user:pass@]host[:port]/path)
@@ -232,7 +235,8 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
             enable_profiling=profile,
             parallel=parallel,
             use_http2=http2,
-            connection_pool_size=connection_pool
+            connection_pool_size=connection_pool,
+            target_location_name=target_location
         )
         
         # Print summary

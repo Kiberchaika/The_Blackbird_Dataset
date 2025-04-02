@@ -420,7 +420,8 @@ class DatasetSync:
         enable_profiling: bool = False,
         parallel: int = 1,
         use_http2: bool = False,
-        connection_pool_size: int = 10
+        connection_pool_size: int = 10,
+        target_location_name: str = "Main"
     ) -> SyncStats:
         """Sync dataset from WebDAV server.
         
@@ -435,6 +436,7 @@ class DatasetSync:
             parallel: Number of parallel downloads (1 for sequential)
             use_http2: Whether to use HTTP/2 for connections
             connection_pool_size: Size of the connection pool
+            target_location_name: Name of the target location
             
         Returns:
             Sync statistics
@@ -448,6 +450,10 @@ class DatasetSync:
         stats = SyncStats()
         if enable_profiling:
             stats.enable_profiling()
+        
+        # Ensure target location exists
+        if target_location_name not in self.dataset.locations.get_all_locations():
+            raise ValueError(f"Target location '{target_location_name}' not found in locations.json")
         
         # Validate components
         invalid_components = [c for c in components if c not in self.schema.schema["components"]]
@@ -604,64 +610,63 @@ class DatasetSync:
                     colour=color,
                     bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
                 ) as pbar:
-                    for file_path, file_size in batch_files:
-                        local_file = self.local_path / file_path
-                        
+                    for symbolic_file_path, file_size in batch_files:
                         try:
-                            success, actual_size = self._download_file(
-                                client, 
-                                file_path, 
-                                local_file, 
-                                file_size,
-                                stats.profiling if enable_profiling else None
-                            )
-                            
-                            if success:
-                                batch_stats["downloaded"] += 1
-                                batch_stats["downloaded_size"] += file_size
-                            elif success is False and actual_size > 0:
-                                # Skipped file
-                                batch_stats["skipped"] += 1
-                            else:
-                                # Failed file
-                                batch_stats["failed"] += 1
-                                batch_errors["download_failure"] += 1
-                                
+                            # Extract relative path and resolve local path
+                            parts = symbolic_file_path.split('/', 1)
+                            if len(parts) != 2:
+                                raise ValueError(f"Invalid symbolic path format: {symbolic_file_path}")
+                            _original_loc, relative_path = parts
+                            target_location_path = self.dataset.locations.get_location_path(target_location_name)
+                            local_file = target_location_path / relative_path
+                            remote_path_to_download = relative_path
                         except Exception as e:
-                            error_msg = str(e)
-                            # Don't log every 404 error, just count them
-                            if "404" in error_msg:
-                                batch_errors["HTTP 404: File not found"] += 1
+                            logger.error(f"Error processing path {symbolic_file_path}: {e}")
+                            with stats_lock: stats.failed_files += 1
+                            pbar.update(1)
+                            continue
+
+                        # Check existence in target location
+                        if resume and local_file.exists():
+                            try:
+                                actual_size = local_file.stat().st_size
+                                if actual_size == file_size:
+                                    with stats_lock:
+                                        stats.skipped_files += 1
+                                    batch_stats["skipped"] += 1
+                                    pbar.update(1)
+                                    continue
+                            except Exception as e:
+                                logger.warning(f"Could not check existing file {local_file}: {e}")
+
+                        # Download file (pass relative_path)
+                        success, downloaded_size = self._download_file(client, remote_path_to_download, local_file, file_size, stats.profiling if enable_profiling else None)
+
+                        # Update stats based on download result
+                        with stats_lock:
+                            if success:
+                                stats.downloaded_files += 1
+                                stats.downloaded_size += downloaded_size
+                                stats.synced_files += 1 # Count successful downloads as synced
+                                stats.synced_size += downloaded_size # Use actual downloaded size
+                                batch_stats["downloaded"] += 1
+                                batch_stats["downloaded_size"] += downloaded_size
                             else:
-                                # Truncate very long error messages
-                                if len(error_msg) > 100:
-                                    error_msg = error_msg[:97] + "..."
-                                batch_errors[error_msg] += 1
-                            
-                            batch_stats["failed"] += 1
-                        
-                        # Calculate current download speed in MB/s
-                        elapsed = time.time() - batch_stats["start_time"]
-                        if elapsed > 0:
-                            download_speed = (batch_stats["downloaded_size"] / (1024*1024)) / elapsed
-                        else:
-                            download_speed = 0
-                        
+                                stats.failed_files += 1
+                                error_message = "Download Failed"
+                                batch_errors[error_message] += 1
+
                         pbar.update(1)
-                        pbar.set_postfix(
-                            speed=f"{download_speed:.2f} MB/s"
-                        )
+                        # Update progress bar postfix with batch stats
+                        pbar.set_postfix({
+                            'down': batch_stats['downloaded'],
+                            'skip': batch_stats['skipped'],
+                            'fail': batch_stats['failed'],
+                            'size_MB': f"{batch_stats['downloaded_size'] / (1024*1024):.1f}"
+                        })
                 
-                # Update global stats with batch stats
+                # Log batch errors
                 with stats_lock:
-                    stats.downloaded_files += batch_stats["downloaded"]
-                    stats.downloaded_size += batch_stats["downloaded_size"]
-                    stats.skipped_files += batch_stats["skipped"]
-                    stats.failed_files += batch_stats["failed"]
-                    stats.synced_files += batch_stats["downloaded"]
-                    stats.synced_size += batch_stats["downloaded_size"]
-                    
-                    # Merge error counts
                     for error, count in batch_errors.items():
                         error_counts[error] += count
                 
@@ -680,99 +685,69 @@ class DatasetSync:
                     except Exception as e:
                         logger.error(f"Batch processing error: {e}")
         else:
-            # Sequential download (original implementation)
+            # Sequential download
             with tqdm(
-                total=stats.total_files, 
+                total=stats.total_files,
                 desc="Syncing files", 
                 unit="file",
-                colour="green",
+                colour="blue", # Or another color
                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
             ) as pbar:
-                start_time = time.time()
-                downloaded_bytes = 0
-                
-                for file_path, file_size in files_to_sync.items():
-                    start_file_sync = time.time_ns() if enable_profiling else 0
-                    
-                    local_file = self.local_path / file_path
-                    
-                    # Check if file exists
-                    start_check_exists = time.time_ns() if enable_profiling and stats.profiling else 0
-                    file_exists = resume and local_file.exists() and local_file.stat().st_size == file_size
-                    if enable_profiling and stats.profiling:
-                        stats.profiling.add_timing('check_exists', time.time_ns() - start_check_exists)
-                
-                    # Skip if file exists and resume is True
-                    if file_exists:
-                        # Uncomment for verbose logging
-                        # logger.debug(f"Skipping existing file: {file_path}")
-                        stats.skipped_files += 1
+                for symbolic_file_path, file_size in files_to_sync.items():
+                    try:
+                        # Extract relative path and resolve local path
+                        parts = symbolic_file_path.split('/', 1)
+                        if len(parts) != 2:
+                            raise ValueError(f"Invalid symbolic path format: {symbolic_file_path}")
+                        _original_loc, relative_path = parts
+                        target_location_path = self.dataset.locations.get_location_path(target_location_name)
+                        local_file = target_location_path / relative_path
+                        remote_path_to_download = relative_path
+                    except Exception as e:
+                        logger.error(f"Error processing path {symbolic_file_path}: {e}")
+                        stats.failed_files += 1
                         pbar.update(1)
                         continue
                     
-                    try:
-                        # Download file
-                        start_download = time.time_ns() if enable_profiling else 0
-                        
-                        # Use WebDAVClient.download_file if available, otherwise direct download_sync
-                        if hasattr(client, 'download_file'):
-                            success = client.download_file(
-                                remote_path=file_path,
-                                local_path=local_file,
-                                profiling=stats.profiling if enable_profiling else None
-                            )
-                        else:
-                            # Create parent directory if it doesn't exist
-                            local_file.parent.mkdir(parents=True, exist_ok=True)
-                            
-                            # Use client.download_sync directly
-                            client.download_sync(
-                                remote_path=file_path,
-                                local_path=str(local_file)
-                            )
-                            success = True
-                        
-                        if enable_profiling and stats.profiling:
-                            stats.profiling.add_timing('download', time.time_ns() - start_download)
-                        
-                        if success:
-                            stats.synced_files += 1
-                            stats.synced_size += file_size
-                            stats.downloaded_files += 1
-                            stats.downloaded_size += file_size
-                            downloaded_bytes += file_size
-                        else:
-                            stats.failed_files += 1
-                            error_counts["download_failure"] += 1
-                        
-                    except Exception as e:
-                        error_msg = str(e)
-                        # Don't log every 404 error, just count them
-                        if "404" in error_msg:
-                            error_counts["HTTP 404: File not found"] += 1
-                        else:
-                            # Truncate very long error messages
-                            if len(error_msg) > 100:
-                                error_msg = error_msg[:97] + "..."
-                            error_counts[error_msg] += 1
-                        
-                        stats.failed_files += 1
+                    # Check existence in target location
+                    if resume and local_file.exists():
+                        try:
+                            actual_size = local_file.stat().st_size
+                            if actual_size == file_size:
+                                stats.skipped_files += 1
+                                pbar.update(1)
+                                pbar.set_postfix({
+                                    'skip': stats.skipped_files,
+                                    'fail': stats.failed_files,
+                                    'size_GB': f"{stats.downloaded_size / (1024*1024*1024):.2f}"
+                                })
+                                continue # Skip download
+                        except Exception as e:
+                            logger.warning(f"Could not check existing file {local_file}: {e}")
+
+                    # Download file (pass relative_path)
+                    success, downloaded_size = self._download_file(client, remote_path_to_download, local_file, file_size, stats.profiling if enable_profiling else None)
                     
-                    # Calculate current download speed in MB/s
-                    elapsed = time.time() - start_time
-                    if elapsed > 0:
-                        download_speed = (downloaded_bytes / (1024*1024)) / elapsed
+                    # Update stats based on download result
+                    if success:
+                        stats.downloaded_files += 1
+                        stats.downloaded_size += downloaded_size
+                        stats.synced_files += 1 # Count successful downloads as synced
+                        stats.synced_size += downloaded_size # Use actual downloaded size
                     else:
-                        download_speed = 0
-                
+                        stats.failed_files += 1
+                        error_message = "Download Failed"
+                        error_counts[error_message] += 1
+                        
                     pbar.update(1)
-                    pbar.set_postfix(
-                        speed=f"{download_speed:.2f} MB/s"
-                    )
-                
-                if enable_profiling and stats.profiling:
-                    stats.profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
-        
+                    # Update progress bar postfix
+                    pbar.set_postfix({
+                        'down': stats.downloaded_files,
+                        'skip': stats.skipped_files,
+                        'fail': stats.failed_files,
+                        'size_GB': f"{stats.downloaded_size / (1024*1024*1024):.2f}"
+                    })
+
         if enable_profiling and stats.profiling:
             stats.profiling.add_timing('sync_total', time.time_ns() - start_total)
         
@@ -800,16 +775,11 @@ class DatasetSync:
             print(f"{Fore.WHITE}Parallel threads used: {Fore.MAGENTA}{parallel}")
         print(f"{Fore.CYAN}{Style.BRIGHT}" + "="*50)
         
-        # Log a summary of errors instead of individual errors
+        # Print error summary
         if error_counts:
-            logger.info(f"\n{Fore.RED}Error Summary:")
-            for error, count in sorted(error_counts.items(), key=lambda x: x[1], reverse=True):
-                # Only show the top 5 errors if there are many
-                if len(error_counts) > 5 and list(error_counts.items()).index((error, count)) >= 5:
-                    remaining_errors = sum(count for _, count in list(error_counts.items())[5:])
-                    logger.info(f"  {Fore.YELLOW}... and {len(error_counts) - 5} other error types ({remaining_errors} occurrences)")
-                    break
-                logger.info(f"  {Fore.RED}{error}: {Fore.YELLOW}{count} occurrences")
+            logger.error("\nError Summary:")
+            for error, count in error_counts.items():
+                logger.error(f"- {error}: {count} times")
         
         logger.info(f"{Fore.GREEN}Synced {stats.synced_files} files, {Fore.RED}failed {stats.failed_files}, {Fore.BLUE}skipped {stats.skipped_files}")
         return stats 
@@ -826,7 +796,8 @@ def clone_dataset(
     enable_profiling: bool = False,
     parallel: int = 1,
     use_http2: bool = False,
-    connection_pool_size: int = 10
+    connection_pool_size: int = 10,
+    target_location: str = "Main"
 ):
     """Clone dataset from remote source.
     
@@ -843,6 +814,7 @@ def clone_dataset(
         parallel: Number of parallel downloads (1 for sequential)
         use_http2: Whether to use HTTP/2 for connections
         connection_pool_size: Size of the connection pool
+        target_location: Name of the target location
         
     Returns:
         Sync statistics
@@ -881,7 +853,7 @@ def clone_dataset(
     sync = DatasetSync(destination)
     
     # Perform sync
-    return sync.sync(
+    stats = sync.sync(
         client=client,
         components=components or list(schema.schema["components"].keys()),
         artists=artists,
@@ -890,8 +862,14 @@ def clone_dataset(
         enable_profiling=enable_profiling,
         parallel=parallel,
         use_http2=use_http2,
-        connection_pool_size=connection_pool_size
+        connection_pool_size=connection_pool_size,
+        target_location_name=target_location
     )
+
+    if progress_callback:
+        progress_callback(stats, target_location)
+
+    return stats
 
 def configure_client(url: str, use_http2: bool = False, connection_pool_size: int = 10) -> WebDAVClient:
     """Configure WebDAV client from URL.

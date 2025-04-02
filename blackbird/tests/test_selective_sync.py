@@ -256,6 +256,8 @@ def test_sync_resume(test_dir, mock_webdav_client):
         
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
+
+        return True # Add return True for successful mock download
     
     mock_webdav_client.download_file.side_effect = mock_download
     
@@ -297,6 +299,8 @@ def test_sync_error_handling(test_dir, mock_webdav_client):
         
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
+        
+        return True # Add return True for successful mock download (when no exception is raised)
     
     mock_webdav_client.download_file.side_effect = mock_download
     

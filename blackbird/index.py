@@ -471,33 +471,26 @@ class DatasetIndex:
                 location_artists[location_name].add(artist)
 
         # Print detailed indexing results
-        logger.info("Final Indexing Results:")
+        logger.info("\nFinal Indexing Results:")
         logger.info(f"Locations processed: {effective_locations_count} / {len(location_roots)}")
         logger.info(f"Total track instances indexed: {len(index.tracks)}")
         logger.info(f"Total unique artists: {len(index.album_by_artist)}")
-        # Count unique albums across locations by stripping location prefix for counting
-        # An album is defined by Artist/Album pair, ignoring location for this count
-        unique_albums = set()
-        if index.album_by_artist:
-             unique_albums = set(ap.split('/', 1)[1] for ap_set in index.album_by_artist.values() for ap in ap_set if '/' in ap)
+        logger.info(f"Total unique albums: {len(index.album_by_artist)}")
+        logger.info(f"Total indexed size: {index.total_size / (1024*1024*1024):.2f} GB")
 
-        logger.info(f"Total unique albums: {len(unique_albums)}")
-        logger.info(f"Total indexed size: {index.total_size / (1024**3):.2f} GB")
-
-        logger.info("Components indexed (aggregated across locations):")
-        # Sort components for consistent output
-        total_indexed_files = 0
+        # Calculate aggregated component stats for logging
+        agg_comp_counts = defaultdict(int)
         if schema.schema["components"]:
             for comp_name in sorted(schema.schema["components"].keys()):
                 count = component_counts.get(comp_name, 0)
-                total_indexed_files += count
+                agg_comp_counts[comp_name] += count
                 size_gb = component_sizes.get(comp_name, 0) / (1024**3)
                 comp_pattern = schema.schema['components'][comp_name].get('pattern', 'N/A')
                 logger.info(f"  - {comp_name} ({comp_pattern}): {count} files ({size_gb:.2f} GB)")
         else:
             logger.info("  No components defined in schema.")
 
-        logger.info(f"Total component files indexed: {total_indexed_files}")
+        logger.info(f"Total component files indexed: {sum(agg_comp_counts.values())}")
 
         if len(unmatched_files) > 0:
             logger.info(f"Found {len(unmatched_files)} unmatched files.")

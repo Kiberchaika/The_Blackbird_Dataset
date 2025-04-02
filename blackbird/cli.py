@@ -293,7 +293,29 @@ def stats(dataset_path: str, missing: Optional[str]):
             # Load and analyze index
             index = DatasetIndex.load(index_path)
             
-            # Count components and their sizes
+            # Print overall statistics
+            click.echo("\nOverall Dataset Statistics:")
+            click.echo(f"Total tracks: {len(index.tracks)}")
+            click.echo(f"Total artists: {len(index.album_by_artist)}")
+            click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
+            click.echo(f"Total files: {index.total_files if hasattr(index, 'total_files') else 'N/A'}") # Handle older index versions
+            click.echo(f"Total size: {index.total_size / (1024*1024*1024):.2f} GB")
+
+            # Print per-location statistics if available
+            if hasattr(index, 'stats_by_location') and index.stats_by_location:
+                click.echo("\nStatistics by Location:")
+                for loc_name, loc_stats in sorted(index.stats_by_location.items()):
+                    size_gb = loc_stats.get('total_size', 0) / (1024*1024*1024)
+                    click.echo(f"  Location: {loc_name}")
+                    click.echo(f"    Tracks: {loc_stats.get('track_count', 0)}")
+                    click.echo(f"    Artists: {loc_stats.get('artist_count', 0)} {list(loc_stats.get('artists', []))}")
+                    click.echo(f"    Albums: {loc_stats.get('album_count', 0)}")
+                    click.echo(f"    Files: {loc_stats.get('file_count', 0)}")
+                    click.echo(f"    Size: {size_gb:.2f} GB")
+            else:
+                click.echo("\n(Per-location statistics not available in this index)")
+
+            # Count components and their sizes (overall)
             component_counts = defaultdict(int)
             component_sizes = defaultdict(int)
             
@@ -317,16 +339,14 @@ def stats(dataset_path: str, missing: Optional[str]):
                     missing_artists.add(track.artist)
                     missing_albums.add(track.album_path)
             
-            # Print statistics
-            click.echo("\nDataset Statistics:")
-            click.echo(f"Total tracks: {len(index.tracks)}")
-            click.echo(f"Total artists: {len(index.album_by_artist)}")
-            click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
-            
-            click.echo("\nComponents:")
-            for comp_name, count in sorted(component_counts.items()):
-                size_gb = component_sizes[comp_name] / (1024*1024*1024)
-                click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            # Print overall component statistics
+            click.echo("\nOverall Component Statistics:")
+            if component_counts:
+                for comp_name, count in sorted(component_counts.items()):
+                    size_gb = component_sizes[comp_name] / (1024*1024*1024)
+                    click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            else:
+                click.echo("No components found in the index.")
             
             # Show missing component statistics if requested
             if missing:
@@ -354,7 +374,29 @@ def stats(dataset_path: str, missing: Optional[str]):
                 
             index = DatasetIndex.load(index_path)
             
-            # Count components and their sizes
+            # Print overall statistics
+            click.echo("\nOverall Dataset Statistics:")
+            click.echo(f"Total tracks: {len(index.tracks)}")
+            click.echo(f"Total artists: {len(index.album_by_artist)}")
+            click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
+            click.echo(f"Total files: {index.total_files if hasattr(index, 'total_files') else 'N/A'}") # Handle older index versions
+            click.echo(f"Total size: {index.total_size / (1024*1024*1024):.2f} GB")
+
+            # Print per-location statistics if available
+            if hasattr(index, 'stats_by_location') and index.stats_by_location:
+                click.echo("\nStatistics by Location:")
+                for loc_name, loc_stats in sorted(index.stats_by_location.items()):
+                    size_gb = loc_stats.get('total_size', 0) / (1024*1024*1024)
+                    click.echo(f"  Location: {loc_name}")
+                    click.echo(f"    Tracks: {loc_stats.get('track_count', 0)}")
+                    click.echo(f"    Artists: {loc_stats.get('artist_count', 0)} {list(loc_stats.get('artists', []))}")
+                    click.echo(f"    Albums: {loc_stats.get('album_count', 0)}")
+                    click.echo(f"    Files: {loc_stats.get('file_count', 0)}")
+                    click.echo(f"    Size: {size_gb:.2f} GB")
+            else:
+                click.echo("\n(Per-location statistics not available in this index)")
+
+            # Count components and their sizes (overall)
             component_counts = defaultdict(int)
             component_sizes = defaultdict(int)
             
@@ -378,16 +420,14 @@ def stats(dataset_path: str, missing: Optional[str]):
                     missing_artists.add(track.artist)
                     missing_albums.add(track.album_path)
             
-            # Print statistics
-            click.echo("\nDataset Statistics:")
-            click.echo(f"Total tracks: {len(index.tracks)}")
-            click.echo(f"Total artists: {len(index.album_by_artist)}")
-            click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
-            
-            click.echo("\nComponents:")
-            for comp_name, count in sorted(component_counts.items()):
-                size_gb = component_sizes[comp_name] / (1024*1024*1024)
-                click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            # Print overall component statistics
+            click.echo("\nOverall Component Statistics:")
+            if component_counts:
+                for comp_name, count in sorted(component_counts.items()):
+                    size_gb = component_sizes[comp_name] / (1024*1024*1024)
+                    click.echo(f"- {comp_name}: {count} files ({size_gb:.2f} GB)")
+            else:
+                click.echo("No components found in the index.")
             
             # Show missing component statistics if requested
             if missing:

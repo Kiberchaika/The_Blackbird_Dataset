@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Optional
 from .dataset import Dataset
 from .schema import DatasetComponentSchema
-from .sync import clone_dataset, SyncStats, configure_client, ProfilingStats, DatasetSync
+from .sync import clone_dataset, SyncStats, configure_client, ProfilingStats, DatasetSync, resume_sync_operation
 from .index import DatasetIndex
 import json
 import sys
@@ -15,12 +15,28 @@ from tqdm import tqdm
 import time
 import logging
 import os
-from .locations import LocationsManager, LocationValidationError, SymbolicPathError
+from .locations import LocationsManager, LocationValidationError, SymbolicPathError, resolve_symbolic_path
 from .utils import format_size # Assuming format_size exists in utils
 from colorama import Fore
+from .operations import load_operation_state, delete_operation_state, find_latest_state_file, OperationState
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Import colorama for cross-platform colored terminal output
+try:
+    from colorama import init, Fore, Back, Style
+    init(autoreset=True)  # Initialize colorama with autoreset
+    COLORAMA_AVAILABLE = True
+except ImportError:
+    COLORAMA_AVAILABLE = False
+    # Create dummy color classes if colorama is not available
+    class DummyColor:
+        def __getattr__(self, name):
+            return ""
+    Fore = DummyColor()
+    Back = DummyColor()
+    Style = DummyColor() # Define Style even if colorama is missing
 
 def _is_dataset_dir(path: Path) -> bool:
     """Check if a directory appears to be a Blackbird dataset root."""
@@ -349,6 +365,83 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
         
     except Exception as e:
         click.echo(f"Error: {str(e)}", err=True)
+        sys.exit(1)
+
+@main.command()
+@click.argument('state_file_path', type=click.Path(dir_okay=False, resolve_path=True))
+@click.option('--dataset-path', type=click.Path(exists=True, file_okay=False, resolve_path=True),
+              help='Path to the dataset directory (defaults to CWD if state file is inside .blackbird)')
+@click.option('--profile', is_flag=True, help='Enable performance profiling')
+@click.option('--parallel', type=int, default=1, help='Number of parallel downloads (1 for sequential)')
+@click.option('--http2', is_flag=True, help='Use HTTP/2 for connections if available')
+@click.option('--connection-pool', type=int, default=10, help='Size of the connection pool')
+@click.option('--debug', is_flag=True, help='Enable debug logging')
+def resume(state_file_path: str, dataset_path: Optional[str], profile: bool, parallel: int, http2: bool,
+           connection_pool: int, debug: bool):
+    """Resume an interrupted sync or move operation from a state file."""
+    try:
+        # Configure logging
+        if debug:
+            logging.basicConfig(level=logging.DEBUG)
+            logging.getLogger('blackbird').setLevel(logging.DEBUG)
+            click.echo("Debug logging enabled")
+
+        state_path = Path(state_file_path)
+
+        # Determine dataset path
+        if dataset_path:
+            ds_path = Path(dataset_path)
+        else:
+            # Try to infer from state file location
+            if ".blackbird" in state_path.parts:
+                blackbird_index = state_path.parts.index(".blackbird")
+                ds_path = Path(*state_path.parts[:blackbird_index])
+                click.echo(f"Inferred dataset path from state file: {ds_path}")
+            else:
+                # Fallback to CWD, but warn user
+                ds_path = Path.cwd()
+                click.echo(f"{Fore.YELLOW}Warning: Could not infer dataset path from state file location. Assuming current directory: {ds_path}{Style.RESET_ALL}")
+                if not (ds_path / ".blackbird").is_dir():
+                     raise click.UsageError(f"Current directory {ds_path} does not appear to be a dataset. Please specify --dataset-path.")
+
+        if not (ds_path / ".blackbird").is_dir():
+             raise click.UsageError(f"Specified or inferred path {ds_path} is not a valid dataset directory.")
+
+        # Load operation state
+        state = load_operation_state(state_path)
+        if not state:
+            raise click.ClickException(f"Failed to load or parse state file: {state_path}")
+
+        click.echo(f"Resuming {state['operation_type']} operation for target location '{state['target_location']}' using state file: {state_path}")
+
+        # --- Resume Logic (call appropriate function) ---
+        if state['operation_type'] == 'sync':
+            success = resume_sync_operation(
+                dataset_path=ds_path,
+                state_file_path=state_path,
+                state=state,
+                enable_profiling=profile,
+                parallel=parallel,
+                use_http2=http2,
+                connection_pool_size=connection_pool
+            )
+        elif state['operation_type'] == 'move':
+            click.echo(f"{Fore.YELLOW}Resuming 'move' operations is not yet implemented.{Style.RESET_ALL}")
+            # success = resume_move_operation(...) # Placeholder
+            success = False # Mark as not successful for now
+        else:
+            raise click.ClickException(f"Unknown operation type in state file: {state['operation_type']}")
+
+        if success:
+            click.echo(f"{Fore.GREEN}Resume operation completed successfully.{Style.RESET_ALL}")
+            # State file should be deleted by the resume function on success
+        else:
+            click.echo(f"{Fore.RED}Resume operation finished with errors or was aborted. State file kept: {state_path}{Style.RESET_ALL}")
+            sys.exit(1)
+
+    except Exception as e:
+        logger.error(f"Resume operation failed: {e}", exc_info=debug)
+        click.echo(f"{Fore.RED}Error during resume: {str(e)}{Style.RESET_ALL}", err=True)
         sys.exit(1)
 
 @main.command()

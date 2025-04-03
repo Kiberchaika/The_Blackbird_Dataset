@@ -43,11 +43,14 @@ from .schema import DatasetComponentSchema
 from .index import DatasetIndex
 from .dataset import Dataset # Ensure Dataset is imported
 from .operations import (
-    create_operation_state, 
-    update_operation_state_file, 
+    create_operation_state,
+    load_operation_state, # Add load_operation_state
+    update_operation_state_file,
     delete_operation_state,
-    OperationStatus
+    OperationStatus,
+    OperationState # Add OperationState type
 )
+from .locations import resolve_symbolic_path # Add resolve_symbolic_path
 
 logger = logging.getLogger(__name__)
 
@@ -936,4 +939,252 @@ def configure_client(url: str, use_http2: bool = False, connection_pool_size: in
     Returns:
         Configured WebDAV client
     """
+    return WebDAVClient(url, use_http2=use_http2, connection_pool_size=connection_pool_size) 
+
+# New function for resuming sync
+def resume_sync_operation(
+    dataset_path: Path,
+    state_file_path: Path,
+    state: OperationState,
+    enable_profiling: bool = False,
+    parallel: int = 1,
+    use_http2: bool = False,
+    connection_pool_size: int = 10,
+) -> bool:
+    """Resumes a sync operation based on the provided state file."""
+    
+    logger.info(f"Starting resume for sync operation from {state_file_path}")
+    
+    try:
+        # Initialize Dataset and load index/locations
+        dataset = Dataset(dataset_path)
+        # dataset.load_index() # Ensure index is loaded --> Incorrect method
+        # Index is loaded automatically during Dataset init, access via dataset.index
+        if not dataset.index: # Check if index loaded successfully
+            logger.error("Failed to load or build dataset index. Cannot resume.")
+            return False
+            
+        # Locations are loaded automatically by Dataset init
+        # Ensure locations were loaded properly
+        if not dataset.locations.get_all_locations():
+            logger.error("Failed to load dataset locations. Cannot resume.")
+            return False
+            
+        # Configure WebDAV client based on state
+        client = configure_client(state['source'], use_http2=use_http2, connection_pool_size=connection_pool_size)
+        
+        # Filter files that need processing (pending or failed)
+        files_to_process: Dict[int, Tuple[str, int]] = {}
+        pending_count = 0
+        failed_count = 0
+        total_in_state = len(state['files'])
+        
+        logger.info("Analyzing state file to determine files to resume...")
+        with tqdm(total=total_in_state, desc="Checking state", unit="file") as pbar:
+            for file_hash, status in state['files'].items():
+                pbar.update(1)
+                if status == "pending" or status.startswith("failed"):
+                    file_info = dataset.index.get_file_info_by_hash(file_hash)
+                    if file_info:
+                        symbolic_path, size = file_info
+                        files_to_process[file_hash] = (symbolic_path, size)
+                        if status == "pending":
+                            pending_count += 1
+                        else:
+                            failed_count += 1
+                    else:
+                        logger.warning(f"Hash {file_hash} from state file not found in current index. Skipping.")
+                # else: status is 'done', skip it
+
+        logger.info(f"Found {len(files_to_process)} files to potentially resume ({pending_count} pending, {failed_count} failed).")
+        
+        if not files_to_process:
+            logger.info("No files in 'pending' or 'failed' state. Nothing to resume.")
+            delete_operation_state(state_file_path) # Clean up completed state file
+            return True # Operation is effectively complete
+        
+        # Initialize stats
+        stats = SyncStats(
+            total_files=total_in_state, # Reflect total from the state file
+            # Initialize counts based on what's already done
+            synced_files=total_in_state - len(files_to_process), 
+            failed_files=0, # Reset failed count for this resume attempt
+            skipped_files=0
+        )
+        if enable_profiling:
+            stats.enable_profiling()
+
+        # Target location validation (already done in sync, but good to have here too)
+        target_location_name = state['target_location']
+        try:
+            target_base_path = dataset.locations.get_location_path(target_location_name)
+            if not target_base_path.is_dir(): # Ensure it exists and is a dir
+                 raise FileNotFoundError(f"Target location '{target_location_name}' path does not exist or is not a directory: {target_base_path}")
+        except (KeyError, FileNotFoundError) as e:
+             logger.error(f"Invalid target location '{target_location_name}' specified in state file or configuration: {e}")
+             return False # Cannot proceed without valid target
+
+        # --- Resume Download Logic ---
+        files_processed_in_resume = 0
+        max_workers = parallel if parallel > 0 else 1
+        processed_hashes_in_batch = set()
+        batch_update_threshold = min(max(10, len(files_to_process) // 100), 500) # Update state file periodically
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor, \
+             tqdm(total=len(files_to_process), desc="Resuming download", unit="file") as pbar:
+            
+            futures = {}
+            for file_hash, (symbolic_remote_path, expected_size) in files_to_process.items():
+                future = executor.submit(
+                    _process_file_for_resume, # Use a helper function
+                    client=client,
+                    dataset=dataset,
+                    symbolic_remote_path=symbolic_remote_path,
+                    expected_size=expected_size,
+                    target_location_name=target_location_name,
+                    file_hash=file_hash, # Pass hash for state update
+                    profiling_stats=stats.profiling
+                )
+                futures[future] = file_hash
+
+            for future in concurrent.futures.as_completed(futures):
+                file_hash = futures[future]
+                try:
+                    symbolic_path, size, status, error_msg = future.result()
+                    files_processed_in_resume += 1
+                    
+                    # Update overall stats
+                    if status == SyncState.SYNCED:
+                        stats.synced_files += 1
+                        stats.downloaded_files += 1 # Assume resume means download
+                        stats.synced_size += size
+                        stats.downloaded_size += size
+                        state_status = "done"
+                    elif status == SyncState.SKIPPED:
+                         stats.skipped_files += 1
+                         state_status = "done" # Mark skipped as done in state
+                    else: # FAILED
+                        stats.failed_files += 1
+                        state_status = f"failed: {error_msg}"
+                    
+                    # Update state file for this hash
+                    update_operation_state_file(state_file_path, file_hash, state_status)
+                    processed_hashes_in_batch.add(file_hash)
+
+                    # Periodically log progress (optional)
+                    # if len(processed_hashes_in_batch) >= batch_update_threshold:
+                    #     logger.debug(f"Updated state file for {len(processed_hashes_in_batch)} files.")
+                    #     processed_hashes_in_batch.clear()
+                    
+                except Exception as exc:
+                    # Handle exceptions from the future itself (e.g., worker crash)
+                    symbolic_path_unknown = files_to_process.get(file_hash, ("<unknown>", 0))[0]
+                    logger.error(f"Error processing file {symbolic_path_unknown} (hash {file_hash}) during resume: {exc}", exc_info=True)
+                    stats.failed_files += 1
+                    # Update state file as failed
+                    update_operation_state_file(state_file_path, file_hash, f"failed: {exc}")
+                    processed_hashes_in_batch.add(file_hash)
+                finally:
+                    pbar.update(1)
+
+        # Final check and cleanup
+        if stats.failed_files == 0:
+            logger.info("Resume completed successfully.")
+            delete_operation_state(state_file_path) # Delete state file on success
+            return True
+        else:
+            logger.warning(f"Resume finished with {stats.failed_files} errors. State file kept: {state_file_path}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Critical error during resume operation: {e}", exc_info=True)
+        return False # Ensure state file is kept on unexpected errors
+
+# Helper function for processing a single file during resume
+def _process_file_for_resume(
+    client: Any,
+    dataset: Dataset,
+    symbolic_remote_path: str,
+    expected_size: int,
+    target_location_name: str,
+    file_hash: int, # Pass hash for potential logging/debugging
+    profiling_stats: Optional[ProfilingStats] = None
+) -> Tuple[str, int, SyncState, Optional[str]]:
+    """Checks local file, downloads if needed, and returns status."""
+    
+    error_msg = None
+    try:
+        # 1. Resolve local path in the target location
+        # Strip location prefix to get relative path for resolution
+        parts = symbolic_remote_path.split('/', 1)
+        if len(parts) != 2:
+             raise ValueError(f"Invalid symbolic path format: {symbolic_remote_path}")
+        relative_path_str = parts[1]
+        
+        # Construct symbolic path for the target location
+        symbolic_local_path = f"{target_location_name}/{relative_path_str}"
+        local_path = dataset.resolve_path(symbolic_local_path)
+
+        # 2. Check if local file exists and matches size
+        if local_path.exists():
+            try:
+                 local_size = local_path.stat().st_size
+                 if local_size == expected_size:
+                     # logger.debug(f"File already exists and matches size: {local_path}")
+                     return symbolic_remote_path, expected_size, SyncState.SKIPPED, None
+                 else:
+                     logger.warning(f"File exists but size mismatch for {local_path}. Expected {expected_size}, got {local_size}. Re-downloading.")
+                     # Attempt to remove the incorrect file before redownload
+                     try:
+                         # Add missing_ok=True
+                         local_path.unlink(missing_ok=True)
+                     except OSError as rm_err:
+                         logger.error(f"Failed to remove existing file with incorrect size {local_path}: {rm_err}")
+                         return symbolic_remote_path, 0, SyncState.FAILED, f"Failed to remove existing file: {rm_err}"
+            except FileNotFoundError:
+                # File vanished between exists() and stat(), proceed to download
+                pass 
+            except OSError as stat_err:
+                logger.error(f"Error accessing existing file {local_path}: {stat_err}")
+                return symbolic_remote_path, 0, SyncState.FAILED, f"Error accessing existing file: {stat_err}"
+
+        # 3. Download if needed
+        # Strip location prefix for remote download path
+        remote_path_for_download = relative_path_str 
+        
+        # Use the internal _download_file method
+        sync_instance = DatasetSync(dataset) # Create a temporary instance to access _download_file
+        success, downloaded_size = sync_instance._download_file(
+            client=client,
+            remote_path=remote_path_for_download,
+            local_path=local_path,
+            file_size=expected_size,
+            profiling=profiling_stats
+        )
+        
+        if success:
+            return symbolic_remote_path, downloaded_size, SyncState.SYNCED, None
+        else:
+            # _download_file should log the specific error
+            # Attempt to clean up potentially partial file
+            try:
+                 if local_path.exists():
+                     local_path.unlink()
+            except OSError:
+                 pass # Ignore cleanup error
+            return symbolic_remote_path, 0, SyncState.FAILED, "Download failed"
+
+    except SymbolicPathError as spe:
+        error_msg = f"Symbolic path resolution error: {spe}"
+        logger.error(f"Error processing {symbolic_remote_path} during resume: {error_msg}")
+        return symbolic_remote_path, 0, SyncState.FAILED, error_msg
+    except Exception as e:
+        error_msg = f"Unexpected error: {e}"
+        logger.error(f"Unexpected error processing {symbolic_remote_path} during resume: {error_msg}", exc_info=True)
+        return symbolic_remote_path, 0, SyncState.FAILED, error_msg
+
+
+# Keep configure_client at the end if it's a standalone utility function
+def configure_client(url: str, use_http2: bool = False, connection_pool_size: int = 10) -> WebDAVClient:
+    """Configure WebDAV client from URL."""
     return WebDAVClient(url, use_http2=use_http2, connection_pool_size=connection_pool_size) 

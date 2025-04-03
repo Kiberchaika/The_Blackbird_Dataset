@@ -41,6 +41,7 @@ except ImportError:
 
 from .schema import DatasetComponentSchema
 from .index import DatasetIndex
+from .dataset import Dataset # Ensure Dataset is imported
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +171,13 @@ class WebDAVClient:
         encoded_parts = [quote(part, safe='') for part in parts]
         return '/'.join(encoded_parts)
     
-    def download_file(self, remote_path: str, local_path: Path, profiling: Optional[ProfilingStats] = None) -> bool:
+    def download_file(self, remote_path: str, local_path: Path, file_size: int = None, profiling: Optional[ProfilingStats] = None) -> bool:
         """Download a file from the WebDAV server.
         
         Args:
             remote_path: Path to the file on the server
             local_path: Local path to save the file
+            file_size: Expected size of the file in bytes (optional, for interface compatibility)
             profiling: Optional profiling stats object
             
         Returns:
@@ -305,28 +307,35 @@ class WebDAVClient:
         return getattr(self.client, name)
 
 class DatasetSync:
-    """Sync manager for dataset synchronization."""
+    """Handles dataset synchronization logic."""
     
-    def __init__(self, local_path: Path):
+    def __init__(self, dataset: Dataset):
         """Initialize sync manager.
         
         Args:
-            local_path: Path to local dataset
+            dataset: The Dataset object to sync.
         """
-        self.local_path = Path(local_path)
-        self.blackbird_dir = self.local_path / ".blackbird"
-        self.schema_path = self.blackbird_dir / "schema.json"
-        self.index_path = self.blackbird_dir / "index.pickle"
+        self.dataset = dataset
+        self.local_path = self.dataset.path
         
-        if self.schema_path.exists():
-            self.schema = DatasetComponentSchema.load(self.schema_path)
-        else:
-            raise ValueError(f"Schema not found at {self.schema_path}")
-            
-        if self.index_path.exists():
-            self.index = DatasetIndex.load(self.index_path)
-        else:
-            raise ValueError(f"Index not found at {self.index_path}")
+        # Load schema and index directly from the dataset object
+        self.schema = self.dataset.schema 
+        self.index = self.dataset.index
+        
+        # Remove redundant loading from paths
+        # self.blackbird_dir = self.local_path / ".blackbird"
+        # self.schema_path = self.blackbird_dir / "schema.json"
+        # self.index_path = self.blackbird_dir / "index.pickle"
+        # 
+        # if self.schema_path.exists():
+        #     self.schema = DatasetComponentSchema.load(self.schema_path)
+        # else:
+        #     raise ValueError(f"Schema not found at {self.schema_path}")
+        #     
+        # if self.index_path.exists():
+        #     self.index = DatasetIndex.load(self.index_path)
+        # else:
+        #     raise ValueError(f"Index not found at {self.index_path}")
     
     def configure_client(self, webdav_url: str, username: str, password: str, 
                          use_http2: bool = False, connection_pool_size: int = 10) -> WebDAVClient:
@@ -355,59 +364,47 @@ class DatasetSync:
         )
         return client
     
-    def _download_file(self, client: Any, file_path: str, local_file: Path, 
-                      file_size: int, profiling: Optional[ProfilingStats] = None) -> Tuple[bool, int]:
-        """Download a single file.
+    def _download_file(self, client: Any, remote_path: str, local_path: Path, file_size: int, profiling: dict | None) -> Tuple[bool, int]:
+        """Download a single file with profiling.
         
         Args:
-            client: WebDAV client
-            file_path: Path to the file on the server
-            local_file: Local path to save the file
-            file_size: Expected file size
-            profiling: Optional profiling stats object
+            client: WebDAV client instance.
+            remote_path: Path to file on remote server (relative to dataset root).
+            local_path: Absolute local path to save the file.
+            file_size: Expected size of the file in bytes.
+            profiling: Dictionary to store profiling data (optional).
             
         Returns:
-            Tuple of (success, file_size)
+            Tuple (success_flag, downloaded_size)
         """
-        start_file_sync = time.time_ns() if profiling else 0
-        
-        # Check if file exists
-        start_check_exists = time.time_ns() if profiling else 0
-        file_exists = local_file.exists() and local_file.stat().st_size == file_size
-        if profiling:
-            profiling.add_timing('check_exists', time.time_ns() - start_check_exists)
-        
-        # Skip if file exists
-        if file_exists:
-            logger.debug(f"Skipping existing file: {file_path}")
-            if profiling:
-                profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
-            return (False, file_size)  # Skipped
+        start_time = time.time() if profiling is not None else None
+        downloaded_size = 0
         
         try:
-            # Download file
-            start_download = time.time_ns() if profiling else 0
+            local_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Use WebDAVClient.download_file
+            # Pass file_size to the client's download method
             success = client.download_file(
-                remote_path=file_path,
-                local_path=local_file,
-                profiling=profiling
+                remote_path=remote_path, 
+                local_path=local_path,
+                file_size=file_size,  # Pass the file_size here
+                profiling=profiling # Pass profiling dict if enabled
             )
             
-            if profiling:
-                profiling.add_timing('download', time.time_ns() - start_download)
+            if success:
+                downloaded_size = file_size # Assume full download if success reported
             
-            if profiling:
-                profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
-            
-            return (success, file_size)
-            
+            return success, downloaded_size
         except Exception as e:
-            logger.error(f"Failed to sync {file_path}: {e}")
-            if profiling:
-                profiling.add_timing('file_sync_total', time.time_ns() - start_file_sync)
-            return (False, 0)  # Failed
+            logger.error(f"Failed to sync {remote_path}: {e}")
+            # Log traceback for more details on unexpected errors
+            if not isinstance(e, (FileNotFoundError, IOError)): # Avoid noisy tracebacks for common errors
+                logger.debug(f"Traceback for {remote_path} failure:", exc_info=True)
+            return False, 0
+        finally:
+            if profiling is not None and start_time is not None:
+                end_time = time.time()
+                profiling[remote_path] = end_time - start_time
     
     def sync(
         self,
@@ -612,16 +609,23 @@ class DatasetSync:
                 ) as pbar:
                     for symbolic_file_path, file_size in batch_files:
                         try:
-                            # Extract relative path and resolve local path
-                            parts = symbolic_file_path.split('/', 1)
-                            if len(parts) != 2:
-                                raise ValueError(f"Invalid symbolic path format: {symbolic_file_path}")
-                            _original_loc, relative_path = parts
+                            # --- Corrected logic for remote and local paths ---
+                            try:
+                                parts = symbolic_file_path.split('/', 1)
+                                # Check if the first part is a known location before stripping
+                                if len(parts) == 2 and parts[0] in self.dataset.locations.get_all_locations():
+                                    relative_path = parts[1] # Path relative to dataset root
+                                else:
+                                    relative_path = symbolic_file_path # Assume no prefix
+                            except Exception as e:
+                                logger.warning(f"Could not parse symbolic path '{symbolic_file_path}', assuming relative: {e}")
+                                relative_path = symbolic_file_path
+                            
                             target_location_path = self.dataset.locations.get_location_path(target_location_name)
-                            local_file = target_location_path / relative_path
-                            remote_path_to_download = relative_path
-                        except Exception as e:
-                            logger.error(f"Error processing path {symbolic_file_path}: {e}")
+                            local_file = target_location_path / relative_path # Local path: target_loc / relative
+                            remote_path_to_download = relative_path # Remote path: just relative
+                        except (SymbolicPathError, LocationValidationError, ValueError, KeyError) as e:
+                            logger.error(f"Error resolving path for {symbolic_file_path} in location '{target_location_name}': {e}")
                             with stats_lock: stats.failed_files += 1
                             pbar.update(1)
                             continue
@@ -639,7 +643,7 @@ class DatasetSync:
                             except Exception as e:
                                 logger.warning(f"Could not check existing file {local_file}: {e}")
 
-                        # Download file (pass relative_path)
+                        # Download file (pass corrected remote_path_to_download)
                         success, downloaded_size = self._download_file(client, remote_path_to_download, local_file, file_size, stats.profiling if enable_profiling else None)
 
                         # Update stats based on download result
@@ -693,18 +697,25 @@ class DatasetSync:
                 colour="blue", # Or another color
                 bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
             ) as pbar:
-                for symbolic_file_path, file_size in files_to_sync.items():
+                for symbolic_file_path, file_size in files_to_sync.items(): # Use symbolic path from index
                     try:
-                        # Extract relative path and resolve local path
-                        parts = symbolic_file_path.split('/', 1)
-                        if len(parts) != 2:
-                            raise ValueError(f"Invalid symbolic path format: {symbolic_file_path}")
-                        _original_loc, relative_path = parts
+                        # --- Corrected logic for remote and local paths ---
+                        try:
+                            parts = symbolic_file_path.split('/', 1)
+                            # Check if the first part is a known location before stripping
+                            if len(parts) == 2 and parts[0] in self.dataset.locations.get_all_locations():
+                                relative_path = parts[1] # Path relative to dataset root
+                            else:
+                                relative_path = symbolic_file_path # Assume no prefix
+                        except Exception as e:
+                            logger.warning(f"Could not parse symbolic path '{symbolic_file_path}', assuming relative: {e}")
+                            relative_path = symbolic_file_path
+                            
                         target_location_path = self.dataset.locations.get_location_path(target_location_name)
-                        local_file = target_location_path / relative_path
-                        remote_path_to_download = relative_path
-                    except Exception as e:
-                        logger.error(f"Error processing path {symbolic_file_path}: {e}")
+                        local_file = target_location_path / relative_path # Local path: target_loc / relative
+                        remote_path_to_download = relative_path # Remote path: just relative
+                    except (SymbolicPathError, LocationValidationError, ValueError, KeyError) as e:
+                        logger.error(f"Error resolving path for {symbolic_file_path} in location '{target_location_name}': {e}")
                         stats.failed_files += 1
                         pbar.update(1)
                         continue
@@ -725,7 +736,7 @@ class DatasetSync:
                         except Exception as e:
                             logger.warning(f"Could not check existing file {local_file}: {e}")
 
-                    # Download file (pass relative_path)
+                    # Download file (pass corrected remote_path_to_download)
                     success, downloaded_size = self._download_file(client, remote_path_to_download, local_file, file_size, stats.profiling if enable_profiling else None)
                     
                     # Update stats based on download result
@@ -822,9 +833,9 @@ def clone_dataset(
     # Create destination directory
     destination.mkdir(parents=True, exist_ok=True)
     
-    # Configure WebDAV client
-    client = WebDAVClient(
-        source_url,
+    # Configure WebDAV client using the helper function
+    client = configure_client(
+        url=source_url,
         use_http2=use_http2,
         connection_pool_size=connection_pool_size
     )
@@ -850,7 +861,10 @@ def clone_dataset(
     index = DatasetIndex.load(index_path)
         
     # Initialize sync manager
-    sync = DatasetSync(destination)
+    # sync = DatasetSync(destination) # Old way
+    # Need to create a Dataset object first
+    dataset = Dataset(destination) 
+    sync = DatasetSync(dataset) # Pass the dataset object
     
     # Perform sync
     stats = sync.sync(

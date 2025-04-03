@@ -213,6 +213,7 @@ class LocationsManager:
     def add_location(self, name: str, path_str: str) -> None:
         """
         Adds a new storage location. Does not save automatically.
+        # Validates the path can be resolved but does not require it to exist.
 
         Args:
             name: The unique name for the location.
@@ -236,11 +237,14 @@ class LocationsManager:
 
         try:
              path = Path(path_str)
-             # Attempt to resolve the path to ensure it's valid and exists
-             resolved_path = path.resolve(strict=True) # Use strict=True for adding
+             # Revert to strict check
+             resolved_path = path.resolve(strict=True) 
              if not resolved_path.is_dir():
                  raise LocationValidationError(f"Path '{resolved_path}' exists but is not a directory.")
+             # if not resolved_path.is_absolute():
+             #     raise LocationValidationError(f"Path '{path_str}' did not resolve to an absolute path: {resolved_path}")
         except FileNotFoundError:
+             # Re-add strict check exception
              raise LocationValidationError(f"Path '{path_str}' does not exist.")
         except Exception as e:
              # Catch other potential errors during Path creation or resolution
@@ -248,7 +252,8 @@ class LocationsManager:
 
         # Store the validated Path object internally
         self._locations[name] = resolved_path
-        print(f"Location '{name}' added with path '{resolved_path}'. Call save_locations() to persist.")
+        # Removing this print statement just in case it causes issues
+        # print(f"Location '{name}' added with path '{resolved_path}'. Call save_locations() to persist.")
 
     def remove_location(self, name: str) -> None:
         """

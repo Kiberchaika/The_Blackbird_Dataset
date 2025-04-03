@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from blackbird.sync import SyncStats
 from blackbird.schema import DatasetComponentSchema
 from blackbird.index import DatasetIndex, TrackInfo
+from blackbird.dataset import Dataset
 
 # Enable debug logging for blackbird module
 logging.getLogger('blackbird').setLevel(logging.DEBUG)
@@ -173,41 +174,34 @@ def mock_webdav_client():
 
 def test_sync_initialization(test_dir):
     """Test sync manager initialization."""
-    sync = DatasetSync(test_dir)
-    assert sync.local_path == test_dir
+    dataset = Dataset(test_dir)
+    sync = DatasetSync(dataset)
+    assert sync.dataset.path == test_dir
     assert sync.schema is not None
     assert sync.index is not None
 
 def test_sync_with_invalid_component(test_dir, mock_webdav_client):
     """Test sync with invalid component."""
-    sync = DatasetSync(test_dir)
+    dataset = Dataset(test_dir)
+    sync = DatasetSync(dataset)
     with pytest.raises(ValueError, match="Invalid components"):
         sync.sync(mock_webdav_client, components=["nonexistent"])
 
 def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
     """Test syncing specific components for a specific artist."""
-    sync = DatasetSync(test_dir)
+    dataset = Dataset(test_dir)
+    sync = DatasetSync(dataset)
     
     # Mock successful downloads
     def mock_download(remote_path, local_path, **kwargs):
-        # Create file with correct size based on the track and file
+        file_size = kwargs.get('file_size') # Get file_size from kwargs
+        if file_size is None:
+             raise ValueError("mock_download requires file_size keyword argument")
         path = Path(local_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Find the track that has this file
-        file_size = None
-        for track in sync.index.tracks.values():
-            if remote_path in track.file_sizes:
-                file_size = track.file_sizes[remote_path]
-                break
-        
-        if file_size is None:
-            raise ValueError(f"File not found in index: {remote_path}")
-        
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
-        
-        return True # Explicitly return True on success
+        return True 
     
     mock_webdav_client.download_file.side_effect = mock_download
     
@@ -230,7 +224,8 @@ def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
 
 def test_sync_resume(test_dir, mock_webdav_client):
     """Test resuming sync with existing files."""
-    sync = DatasetSync(test_dir)
+    dataset = Dataset(test_dir)
+    sync = DatasetSync(dataset)
     
     # Create an existing file with correct size
     existing_file = test_dir / "19_84/Album1/Track1_instrumental.mp3"
@@ -240,24 +235,14 @@ def test_sync_resume(test_dir, mock_webdav_client):
     
     # Mock successful downloads
     def mock_download(remote_path, local_path, **kwargs):
-        # Create file with correct size based on the track and file
+        file_size = kwargs.get('file_size') # Get file_size from kwargs
+        if file_size is None:
+             raise ValueError("mock_download requires file_size keyword argument")
         path = Path(local_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Find the track that has this file
-        file_size = None
-        for track in sync.index.tracks.values():
-            if remote_path in track.file_sizes:
-                file_size = track.file_sizes[remote_path]
-                break
-        
-        if file_size is None:
-            raise ValueError(f"File not found in index: {remote_path}")
-        
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
-
-        return True # Add return True for successful mock download
+        return True 
     
     mock_webdav_client.download_file.side_effect = mock_download
     
@@ -276,31 +261,21 @@ def test_sync_resume(test_dir, mock_webdav_client):
 
 def test_sync_error_handling(test_dir, mock_webdav_client):
     """Test handling of sync errors."""
-    sync = DatasetSync(test_dir)
+    dataset = Dataset(test_dir)
+    sync = DatasetSync(dataset)
     
     # Mock failed download
     def mock_download(remote_path, local_path, **kwargs):
+        file_size = kwargs.get('file_size') # Get file_size from kwargs
         if "Track1" in remote_path:
             raise Exception("Download failed")
-        
-        # Create file with correct size based on the track and file
+        if file_size is None:
+             raise ValueError("mock_download requires file_size keyword argument")
         path = Path(local_path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Find the track that has this file
-        file_size = None
-        for track in sync.index.tracks.values():
-            if remote_path in track.file_sizes:
-                file_size = track.file_sizes[remote_path]
-                break
-        
-        if file_size is None:
-            raise ValueError(f"File not found in index: {remote_path}")
-        
         with open(path, 'wb') as f:
             f.write(b'0' * file_size)
-        
-        return True # Add return True for successful mock download (when no exception is raised)
+        return True 
     
     mock_webdav_client.download_file.side_effect = mock_download
     

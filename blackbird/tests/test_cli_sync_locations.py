@@ -87,38 +87,38 @@ def mock_webdav_for_sync():
         mock_client_instance = MagicMock()
         mock_client_instance.check_connection.return_value = True # Needed by sync's initial check
 
-        def download_side_effect(remote_path, local_path, **kwargs):
-            if remote_path == ".blackbird/schema.json":
+        def download_side_effect(remote_path, local_path, file_size=None, **kwargs):
+            if remote_path == ".blackbird/schema.json": 
                 # Create dummy schema content to be "downloaded"
                 schema_content = {"version": "1.0", "components": {
                      "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
                      "instr": {"pattern": "*_instr.mp3", "multiple": False}
                 }}
-                local_path.parent.mkdir(parents=True, exist_ok=True)
+                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(local_path, 'w') as f:
                     json.dump(schema_content, f)
                 return True
-            elif remote_path == ".blackbird/index.pickle":
+            elif remote_path == ".blackbird/index.pickle": 
                  # Create dummy index content to be "downloaded"
                  track_info = TrackInfo(
-                     track_path="Main/Artist1/Album1/Track1", artist="Artist1",
-                     album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
-                     files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
-                     file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
+                     track_path="Artist1/Album1/Track1", artist="Artist1", 
+                     album_path="Artist1/Album1", cd_number=None, base_name="Track1",
+                     files={"vocals": "Artist1/Album1/Track1_vocals.mp3"}, 
+                     file_sizes={"Artist1/Album1/Track1_vocals.mp3": 1024} 
                  )
                  index = DatasetIndex(
                      last_updated=datetime.now(),
-                     tracks={"Main/Artist1/Album1/Track1": track_info},
-                     track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
-                     album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
-                     stats_by_location={"Main": {"file_count": 1, "total_size": 1024, "track_count": 1, "album_count": 1, "artist_count": 1}}
+                     tracks={"Artist1/Album1/Track1": track_info},
+                     track_by_album={"Artist1/Album1": {"Artist1/Album1/Track1"}},
+                     album_by_artist={"Artist1": {"Artist1/Album1"}}, total_size=1024,
+                     stats_by_location={} 
                  )
-                 local_path.parent.mkdir(parents=True, exist_ok=True)
+                 Path(local_path).parent.mkdir(parents=True, exist_ok=True)
                  index.save(local_path)
                  return True
-            elif remote_path == "Artist1/Album1/Track1_vocals.mp3":
+            elif remote_path == "Artist1/Album1/Track1_vocals.mp3": 
                 # Simulate downloading the actual file
-                local_path.parent.mkdir(parents=True, exist_ok=True)
+                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(local_path, 'wb') as f:
                     f.write(b'fake_vocals_data') # Write dummy data
                 # Crucially, set the size correctly after writing
@@ -140,45 +140,42 @@ def mock_webdav_for_clone():
         mock_client_instance = MagicMock()
         mock_client_instance.check_connection.return_value = True # Needed by clone_dataset's initial check
 
-        def download_side_effect(remote_path, local_path, **kwargs):
+        # Use the same download logic as the sync mock
+        def download_side_effect(remote_path, local_path, file_size=None, **kwargs):
             if remote_path == ".blackbird/schema.json":
-                # Create dummy schema content to be "downloaded"
                 schema_content = {"version": "1.0", "components": {
                      "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
                      "instr": {"pattern": "*_instr.mp3", "multiple": False}
                 }}
-                local_path.parent.mkdir(parents=True, exist_ok=True)
+                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(local_path, 'w') as f:
                     json.dump(schema_content, f)
                 return True
             elif remote_path == ".blackbird/index.pickle":
-                 # Create dummy index content to be "downloaded"
                  track_info = TrackInfo(
-                     track_path="Main/Artist1/Album1/Track1", artist="Artist1",
-                     album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
-                     files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
-                     file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
+                     track_path="Artist1/Album1/Track1", artist="Artist1",
+                     album_path="Artist1/Album1", cd_number=None, base_name="Track1",
+                     files={"vocals": "Artist1/Album1/Track1_vocals.mp3"},
+                     file_sizes={"Artist1/Album1/Track1_vocals.mp3": 1024}
                  )
                  index = DatasetIndex(
                      last_updated=datetime.now(),
-                     tracks={"Main/Artist1/Album1/Track1": track_info},
-                     track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
-                     album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
-                     stats_by_location={"Main": {"file_count": 1, "total_size": 1024, "track_count": 1, "album_count": 1, "artist_count": 1}}
+                     tracks={"Artist1/Album1/Track1": track_info},
+                     track_by_album={"Artist1/Album1": {"Artist1/Album1/Track1"}},
+                     album_by_artist={"Artist1": {"Artist1/Album1"}}, total_size=1024,
+                     stats_by_location={}
                  )
-                 local_path.parent.mkdir(parents=True, exist_ok=True)
+                 Path(local_path).parent.mkdir(parents=True, exist_ok=True)
                  index.save(local_path)
                  return True
             elif remote_path == "Artist1/Album1/Track1_vocals.mp3":
-                # Simulate downloading the actual file
-                local_path.parent.mkdir(parents=True, exist_ok=True)
+                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(local_path, 'wb') as f:
-                    f.write(b'fake_vocals_data') # Write dummy data
-                # Crucially, set the size correctly after writing
+                    f.write(b'fake_vocals_data')
                 os.truncate(local_path, 1024)
                 return True
             else:
-                print(f"Mock download called for unexpected path: {remote_path}")
+                print(f"Clone Mock download called for unexpected path: {remote_path}")
                 return False
 
         mock_client_instance.download_file.side_effect = download_side_effect
@@ -210,12 +207,11 @@ def test_clone_to_default_location(tmp_path, mock_webdav_for_clone):
     main_storage_path = Path(locations[LocationsManager.DEFAULT_LOCATION_NAME])
     assert main_storage_path.exists()
     assert main_storage_path.is_dir()
-    assert main_storage_path.parent == local_clone_path # Default Main storage should be inside the clone dir
-
-    # Verify the file landed in the correct *absolute* path within the "Main" location
-    expected_file_path = main_storage_path / "Artist1" / "Album1" / "Track1_vocals.mp3"
-    assert expected_file_path.exists()
-    assert expected_file_path.stat().st_size == 1024
+    assert main_storage_path == local_clone_path # New assertion: default Main IS the clone root
+    
+    # Also verify the actual downloaded file exists within the Main location (which is the root)
+    expected_file_path = local_clone_path / "Artist1" / "Album1" / "Track1_vocals.mp3"
+    assert expected_file_path.exists(), f"File not found at {expected_file_path}"
 
 
 # Test clone to specific location

@@ -17,6 +17,7 @@ import logging
 import os
 from .locations import LocationsManager, LocationValidationError, SymbolicPathError
 from .utils import format_size # Assuming format_size exists in utils
+from colorama import Fore
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -107,11 +108,14 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
         component_list = components.split(',') if components else None
         artist_list = artists.split(',') if artists else None
         
+        # --- Use Path object consistently --- 
+        dest_path = Path(destination)
+        
         # Validate proportion
         if proportion is not None and not (0 < proportion <= 1):
             raise ValueError("Proportion must be between 0 and 1")
             
-        click.echo(f"Cloning from {source} to {destination}")
+        click.echo(f"Cloning from {source} to {dest_path}")
         if component_list:
             click.echo(f"Components: {', '.join(component_list)}")
         if missing:
@@ -124,7 +128,7 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
         # Clone dataset
         stats = clone_dataset(
             source_url=source,
-            destination=Path(destination),
+            destination=dest_path,
             components=component_list,
             missing_component=missing,
             artists=artist_list,
@@ -137,8 +141,34 @@ def clone(source: str, destination: str, components: Optional[str], missing: Opt
             target_location=target_location
         )
         
-        # Print summary
-        click.echo("\nClone completed!")
+        # Use the LocationsManager to ensure default locations are handled
+        locations_manager = LocationsManager(dest_path)
+        try:
+            # Load locations (creates default 'Main' in memory if file missing)
+            locations_manager.load_locations()
+            
+            # Determine the path for the target location (or default)
+            target_path_str = locations_manager.get_location_path(target_location)
+            
+            # Ensure the directory for the target location exists
+            Path(target_path_str).mkdir(parents=True, exist_ok=True)
+            logger.info(f"Ensured directory exists for location '{target_location}': {target_path_str}")
+
+            # Save locations only if the file didn't exist initially
+            if not locations_manager.locations_file_path.exists():
+                click.echo("Saving default locations file...")
+                locations_manager.save_locations()
+                click.echo(f"Successfully created locations file at {locations_manager.locations_file_path}")
+
+        except LocationValidationError as e:
+             logger.error(f"Error handling locations after clone: {e}", exc_info=True)
+             click.echo(f"{Fore.RED}Warning: Error setting up locations after clone: {e}")
+        except Exception as e:
+             logger.error(f"Unexpected error setting up locations after clone: {e}", exc_info=True)
+             click.echo(f"{Fore.RED}Warning: Unexpected error setting up locations after clone.")
+             # Don't prevent clone completion message for this
+
+        click.echo(f"\n{Fore.GREEN}Clone completed!")
         click.echo(f"Total files: {stats.total_files}")
         click.echo(f"Downloaded: {stats.downloaded_files}")
         click.echo(f"Failed: {stats.failed_files}")
@@ -213,33 +243,32 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
             if not client.download_file(".blackbird/schema.json", schema_path):
                 raise ValueError(f"Failed to download schema from {source}")
             
-            # Load schema
-            schema = DatasetComponentSchema.load(schema_path)
-            
             # Download index
             click.echo("Downloading index...")
             if not client.download_file(".blackbird/index.pickle", index_path):
                 raise ValueError(f"Failed to download index from {source}")
             
-            # Load index
-            index = DatasetIndex.load(index_path)
+            # Create Dataset object (will load downloaded schema/index)
+            dataset = Dataset(dest_path)
             
-            # Create dataset sync
-            dataset_sync = DatasetSync(dest_path)
+            # Create dataset sync using the Dataset object
+            dataset_sync = DatasetSync(dataset)
             
         else:
             # Load existing dataset
             click.echo("Loading existing dataset...")
+            dataset = Dataset(dest_path) # Create Dataset object first
             
             # Force reindex if requested
             if force_reindex:
                 click.echo("Forcing reindex of local dataset...")
-                dataset = Dataset(dest_path)
                 dataset.rebuild_index()
                 click.echo("Reindex complete.")
+                # Need to reload the Dataset object to get the new index
+                dataset = Dataset(dest_path) 
             
-            # Create dataset sync
-            dataset_sync = DatasetSync(dest_path)
+            # Create dataset sync using the Dataset object
+            dataset_sync = DatasetSync(dataset)
             
             # Verify that we have the same components
             remote_schema_path = Path(tempfile.mkdtemp()) / "schema.json"
@@ -250,8 +279,8 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
             local_schema = dataset_sync.schema
             
             # Check if components match
-            remote_components = set(remote_schema.schema['components'].keys())
-            local_components = set(local_schema.schema['components'].keys())
+            remote_components = set(remote_schema.schema.get('components', {}).keys())
+            local_components = set(local_schema.schema.get('components', {}).keys())
             
             if remote_components != local_components:
                 click.echo("Warning: Remote and local component schemas don't match.")
@@ -269,21 +298,21 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
         # Ensure schema has components
         if not dataset_sync.schema.schema.get('components'):
             click.echo("Warning: Local schema has no components defined. Copying components from remote schema.")
-            dataset_sync.schema.schema['components'] = remote_schema.schema['components']
-            dataset_sync.schema.save()
+            dataset.schema.schema['components'] = remote_schema.schema['components']
+            dataset.schema.save()
             click.echo("Schema updated with components from remote.")
             
             # Rebuild index with updated schema
             click.echo("Rebuilding index with updated schema...")
-            dataset = Dataset(dest_path)
             dataset.rebuild_index()
             
-            # Reload DatasetSync with updated index
-            dataset_sync = DatasetSync(dest_path)
+            # Reload DatasetSync with updated index - Recreate Dataset object first
+            dataset = Dataset(dest_path) # Re-init Dataset to pick up new index
+            dataset_sync = DatasetSync(dataset)
         
         sync_stats = dataset_sync.sync(
             client=client,
-            components=component_list if component_list else list(local_schema.schema['components'].keys()),
+            components=component_list if component_list else list(dataset_sync.schema.schema.get('components', {}).keys()),
             artists=artist_list,
             albums=album_list,
             missing_component=missing,
@@ -295,8 +324,7 @@ def sync(source: str, destination: str, components: Optional[str], missing: Opti
             target_location_name=target_location
         )
         
-        # Print summary
-        click.echo("\nSync completed!")
+        click.echo(f"\n{Fore.GREEN}Sync completed!")
         click.echo(f"Total files: {sync_stats.total_files}")
         click.echo(f"Downloaded: {sync_stats.downloaded_files}")
         click.echo(f"Failed: {sync_stats.failed_files}")

@@ -26,7 +26,7 @@ class MockWebDAVClient:
         self.dataset_dir = Path(dataset_dir)
         self.files_downloaded = []
     
-    def download_file(self, remote_path, local_path, profiling=None):
+    def download_file(self, remote_path, local_path, file_size=None, profiling=None):
         """Mock downloading a file by copying from test directory"""
         source = self.dataset_dir / remote_path
         dest = Path(local_path)

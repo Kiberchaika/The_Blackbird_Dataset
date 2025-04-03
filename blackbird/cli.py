@@ -15,15 +15,71 @@ from tqdm import tqdm
 import time
 import logging
 import os
-from .locations import LocationsManager, LocationValidationError
+from .locations import LocationsManager, LocationValidationError, SymbolicPathError
+from .utils import format_size # Assuming format_size exists in utils
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@click.group()
-def main():
+def _is_dataset_dir(path: Path) -> bool:
+    """Check if a directory appears to be a Blackbird dataset root."""
+    return (path / ".blackbird").is_dir()
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx):
     """Blackbird Dataset Manager CLI"""
-    pass
+    if ctx.invoked_subcommand is None:
+        # Check if CWD is a dataset directory
+        cwd = Path.cwd()
+        if _is_dataset_dir(cwd):
+            click.echo(f"Blackbird Dataset Status ({cwd}):")
+            try:
+                # Initialize managers
+                locations_manager = LocationsManager(cwd)
+                locations_manager.load_locations()
+                dataset = Dataset(cwd) # Initializes locations via LocationsManager
+                
+                # Print Locations
+                click.echo("\nLocations:")
+                locs = locations_manager.get_all_locations()
+                if not locs:
+                    click.echo("  No locations configured (using default 'Main').")
+                else:
+                    for name, path in locs.items():
+                        click.echo(f"  - {name}: {path}")
+
+                # Print Index Info
+                click.echo("\nIndex:")
+                try:
+                    index_path = dataset.path / ".blackbird" / "index.pickle"
+                    if not index_path.exists():
+                       raise FileNotFoundError("Index file not found")
+                    index = DatasetIndex.load(index_path) # Correct way to load
+                    click.echo(f"  Last updated: {index.last_updated}")
+                    click.echo("  Statistics by Location:")
+                    if not index.stats_by_location:
+                         click.echo("    No location-specific stats found (re-index needed?).")
+                    else:
+                        for loc_name, stats in index.stats_by_location.items():
+                            click.echo(f"    {loc_name}:")
+                            click.echo(f"      Files: {stats.get('file_count', 0)}")
+                            click.echo(f"      Size: {format_size(stats.get('total_size', 0))}")
+                            click.echo(f"      Tracks: {stats.get('track_count', 0)}")
+                            click.echo(f"      Albums: {stats.get('album_count', 0)}")
+                            click.echo(f"      Artists: {stats.get('artist_count', 0)}")
+                except FileNotFoundError:
+                    click.echo("  Index file (.blackbird/index.pickle) not found. Run 'blackbird reindex .'")
+                except Exception as e:
+                    click.echo(f"  Error loading index: {e}", err=True)
+                    
+            except LocationValidationError as e:
+                 click.echo(f"Error loading locations: {e}", err=True)
+            except Exception as e:
+                click.echo(f"An unexpected error occurred: {e}", err=True)
+        else:
+             # Not a dataset dir, show help (default Click behavior)
+             click.echo(ctx.get_help())
 
 @main.command()
 @click.argument('source')

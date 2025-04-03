@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, Set, List, Optional, TYPE_CHECKING
+from typing import Dict, Set, List, Optional, TYPE_CHECKING, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 import pickle
@@ -38,6 +38,7 @@ class DatasetIndex:
     album_by_artist: Dict[str, Set[str]]  # artist_name -> set of album_paths
     total_size: int  # Total size of all indexed files
     stats_by_location: Dict[str, Dict] = field(default_factory=dict)  # location_name -> {file_count, total_size, track_count, album_count, artist_count}
+    file_info_by_hash: Dict[int, Tuple[str, int]] = field(default_factory=dict) # hash(symbolic_file_path) -> (symbolic_file_path, size)
     version: str = "1.0"  # Move version with default value to the end
 
     @classmethod
@@ -168,6 +169,10 @@ class DatasetIndex:
         if track_path not in self.tracks:
             return {}
         return self.tracks[track_path].files
+
+    def get_file_info_by_hash(self, hash_val: int) -> Optional[Tuple[str, int]]:
+        """Retrieve file info (symbolic path, size) by its symbolic path hash."""
+        return self.file_info_by_hash.get(hash_val)
 
     @classmethod
     def build(cls, dataset_path: Path, schema: 'DatasetComponentSchema', progress_callback=None) -> 'DatasetIndex':
@@ -433,7 +438,7 @@ class DatasetIndex:
                     file_sizes={} # symbolic_file_path -> size
                 )
 
-                # Add component files with their symbolic paths
+                # Add component files with their symbolic paths and calculate hashes
                 all_components_added = True
                 for comp_name, abs_path, size in components_info:
                     try:
@@ -441,6 +446,21 @@ class DatasetIndex:
                         symbolic_file_path = f"{location_name}/{rel_path_in_loc}"
                         track.files[comp_name] = symbolic_file_path
                         track.file_sizes[symbolic_file_path] = size
+
+                        # Calculate and store file hash
+                        file_hash = hash(symbolic_file_path)
+                        if file_hash in index.file_info_by_hash:
+                            # Hash collision or duplicate file path (potentially across locations)
+                            existing_path, existing_size = index.file_info_by_hash[file_hash]
+                            if existing_path != symbolic_file_path:
+                                logger.warning(f"Hash collision detected: hash({symbolic_file_path}) == hash({existing_path}). "
+                                               f"This might impact resume functionality for one of these files.")
+                            # If path is the same, it's likely a rescan or duplicate in grouping, allow overwrite/update
+                            # If sizes differ for the same path, it's data inconsistency. Log it.
+                            elif existing_size != size:
+                                 logger.warning(f"File size mismatch for {symbolic_file_path} during indexing. Previous: {existing_size}, New: {size}.")
+                        index.file_info_by_hash[file_hash] = (symbolic_file_path, size)
+
                     except ValueError:
                         logger.warning(f"Could not form relative path for {abs_path} in {location_name}. Skipping component {comp_name} for track {symbolic_track_path}")
                         all_components_added = False

@@ -1004,7 +1004,6 @@ def remove_location(dataset_path: str, name: str):
 @click.argument('target_loc')
 @click.option('--size', type=float, required=True, help='Approximate size in GB to move.')
 @click.option('--dry-run', is_flag=True, help='Simulate the move without moving files.')
-@click.confirmation_option(prompt='Are you sure you want to move data between these locations?')
 def balance_location(dataset_path: str, source_loc: str, target_loc: str, size: float, dry_run: bool):
     """Balance storage by moving data between locations to reach a target size."""
     try:
@@ -1015,6 +1014,12 @@ def balance_location(dataset_path: str, source_loc: str, target_loc: str, size: 
         if dataset.index is None:
              click.echo(f"{Fore.RED}Error: Dataset index not found or failed to load at {dataset.index_path}. Please run 'reindex' first.", err=True)
              sys.exit(1)
+
+        # Manual confirmation only if not a dry run
+        if not dry_run:
+            if not click.confirm(f"Proceed with moving approx {size:.2f}GB from '{source_loc}' to '{target_loc}'?"): # Adjusted prompt
+                click.echo("Operation aborted.")
+                sys.exit(1)
 
         click.echo(f"Attempting to move approximately {size:.2f} GB from '{source_loc}' to '{target_loc}'...")
 
@@ -1054,28 +1059,40 @@ def balance_location(dataset_path: str, source_loc: str, target_loc: str, size: 
 @location.command('move-folders')
 @click.argument('dataset_path', type=click.Path(exists=True, file_okay=False, resolve_path=True))
 @click.argument('target_loc')
-@click.argument('folders', nargs=-1, required=True)
+@click.argument('folders_str')
 @click.option('--source-location', required=True, help='Name of the source location to move folders from.')
 @click.option('--dry-run', is_flag=True, help='Simulate the move without moving files.')
-@click.confirmation_option(prompt='Are you sure you want to move these specific folders?')
-def move_location_folders(dataset_path: str, target_loc: str, folders: List[str], source_location: str, dry_run: bool):
+def move_location_folders(dataset_path: str, target_loc: str, folders_str: str, source_location: str, dry_run: bool):
     """Move specific folders (relative to source location root) to another location."""
     try:
+        # Split the folders string into a list
+        folders = [f.strip() for f in folders_str.split(',') if f.strip()]
+        if not folders:
+            click.echo("Error: No folder paths provided.", err=True)
+            sys.exit(1)
+
         dataset_path_obj = Path(dataset_path)
         dataset = Dataset(dataset_path_obj)
-        # dataset.load_index() # REMOVED: Index is loaded on Dataset init if available
 
         if dataset.index is None:
              click.echo(f"{Fore.RED}Error: Dataset index not found or failed to load at {dataset.index_path}. Please run 'reindex' first.", err=True)
              sys.exit(1)
 
+        # Manual confirmation only if not a dry run
+        if not dry_run:
+            # Use the list version for the prompt
+            if not click.confirm(f"Proceed with moving folders {folders} from '{source_location}' to '{target_loc}'?"): # Adjusted prompt
+                click.echo("Operation aborted.")
+                sys.exit(1)
+
+        # Use the list version for logging
         click.echo(f"Attempting to move folders {folders} from '{source_location}' to '{target_loc}'...")
 
         move_stats = move_data(
             dataset=dataset,
             source_location_name=source_location,
             target_location_name=target_loc,
-            specific_folders=list(folders),
+            specific_folders=folders, # Pass the processed list
             dry_run=dry_run,
         )
 

@@ -216,6 +216,7 @@ def move_data(
 
     for i, (hash_val, source_symbolic_path, size) in enumerate(files_to_process_info):
         progress = f"({i + 1}/{total_files_to_move})"
+        move_failed = False # Flag to break outer loop if needed
         if current_state_files.get(hash_val) == "done": # Should have been filtered, but double check
             logger.debug(f"{progress} Skipping already completed file: {source_symbolic_path}")
             continue
@@ -248,63 +249,76 @@ def move_data(
             current_state_files[hash_val] = error_msg
             failed_count += 1
             if state_file_path:
+                # Update state file immediately on failure
                 operations.update_operation_state_file(state_file_path, hash_val, error_msg)
-        except OSError as e:
+            move_failed = True
+            # Decide if we should continue or break on path error - let's continue for now
+            # break # Uncomment to stop on first path error
+        except (shutil.Error, OSError) as e:
+            error_msg = f"failed: {e}"
             logger.error(f"{progress} Failed to move {source_symbolic_path}: {e}")
-            error_msg = f"failed: {type(e).__name__}: {e}"
-            # Check if source exists - maybe moved previously but state update failed?
-            if not abs_source_path.exists() and abs_target_path.exists() and abs_target_path.stat().st_size == size:
-                 logger.warning(f"  -> Source missing, target exists with correct size. Marking as done.")
-                 current_state_files[hash_val] = "done" # Assume it was moved successfully before crash
-                 moved_count += 1 # Count it as moved for stats
-                 total_bytes_moved += size
-                 if state_file_path:
-                    operations.update_operation_state_file(state_file_path, hash_val, "done")
-            else:
-                 current_state_files[hash_val] = error_msg
-                 failed_count += 1
-                 if state_file_path:
-                    operations.update_operation_state_file(state_file_path, hash_val, error_msg)
-
-        except Exception as e: # Catch any other unexpected error
-            error_msg = f"failed: Unexpected error: {type(e).__name__}: {e}"
-            logger.exception(f"{progress} An unexpected error occurred moving {source_symbolic_path}: {e}")
             current_state_files[hash_val] = error_msg
             failed_count += 1
             if state_file_path:
+                # Update state file immediately on failure
                 operations.update_operation_state_file(state_file_path, hash_val, error_msg)
+            move_failed = True
+            # Decide if we should continue or break on move error - let's break
+            break # Stop the move process on the first actual move error
+        except Exception as e:
+            error_msg = f"failed: Unexpected error: {e}"
+            logger.exception(f"{progress} Unexpected error moving {source_symbolic_path}: {e}")
+            current_state_files[hash_val] = error_msg
+            failed_count += 1
+            if state_file_path:
+                # Update state file immediately on failure
+                operations.update_operation_state_file(state_file_path, hash_val, error_msg)
+            move_failed = True
+            # Decide if we should continue or break on unexpected error - let's break
+            break # Stop the move process on unexpected errors
 
+        # Removed the break condition here as we break within exception handlers now if needed
+        # if move_failed:
+        #     break
 
-    # --- 5. Cleanup ---
-    logger.info("Move process finished.")
-    if state_file_path:
-        # Reload state to get final counts before deciding to delete
-        final_state = operations.load_operation_state(state_file_path)
-        final_failed_count = 0
-        if final_state:
-            final_failed_count = sum(1 for status in final_state['files'].values() if isinstance(status, str) and status.startswith("failed"))
-        else:
-            logger.warning(f"Could not reload final state from {state_file_path} before cleanup.")
-            # Assume failure if we can't reload the state
-            final_failed_count = failed_count if failed_count > 0 else 1 # If initial failed>0 use that, else assume 1 failure
-
-        if final_failed_count == 0:
-            logger.info("All files moved successfully. Deleting operation state file.")
-            operations.delete_operation_state(state_file_path)
-        else:
-            logger.warning(f"{final_failed_count} file(s) failed to move. "
-                           f"State file kept at: {state_file_path}. Use 'resume' command to retry.")
-            failed_count = final_failed_count # Update failed count based on final state
-
-    # --- 6. Return Stats ---
-    stats = {
+    # --- 5. Finalize and Report ---
+    logger.info("Move operation loop finished.")
+    final_stats = {
         "moved_files": moved_count,
         "failed_files": failed_count,
-        "skipped_files": skipped_count, # Relevant only for dry run
+        "skipped_files": skipped_count + (total_files_to_move - moved_count - failed_count), # Account for skipped due to prior state or filtering
         "total_bytes_moved": total_bytes_moved,
-        "target_size_gb": size_limit_gb, # The requested limit
-        "actual_moved_size_bytes": total_bytes_moved,
+        "state_file_path": state_file_path if not dry_run else None, # Explicitly add state file path
+        # Add keys potentially used by CLI:
+        "identified_files": len(candidate_files), # Or maybe len(files_to_process_info) before filtering?
+        "files_to_move": {h: (p, s) for h, p, s in files_to_process_info}, # Maybe needed?
+        "total_bytes_to_move": target_size_bytes # Add this for dry run consistency
     }
-    logger.info(f"Move Summary: Moved={moved_count}, Failed={failed_count}, Skipped={skipped_count}, "
-                f"Bytes Moved={format_size(total_bytes_moved)}")
-    return stats 
+
+    if not dry_run and state_file_path:
+        # Determine the correct condition for deletion: all attempted files are done.
+        all_attempted_done = True
+        if files_to_process_info: # Check if any files were meant to be processed
+            for h, _, _ in files_to_process_info:
+                 if current_state_files.get(h) != "done":
+                      all_attempted_done = False
+                      break
+        else: # No files to process, operation is trivially complete
+            all_attempted_done = True 
+
+        # Check if any failures occured during processing
+        # We rely on the failed_count accumulated during the loop
+        if failed_count == 0 and all_attempted_done:
+            logger.info("All files moved successfully or none needed moving. Deleting state file.")
+            operations.delete_operation_state(state_file_path)
+        elif failed_count > 0:
+            logger.warning(f"{failed_count} file(s) failed to move. State file kept at: {state_file_path}. Use 'resume' command to retry.")
+        else: # Moved some, but not all (maybe interrupted before starting or filtered?) or maybe no files were selected
+             # Check if the state file actually exists before logging about keeping it
+             if state_file_path.exists():
+                logger.info(f"Move operation did not process all potential files or encountered no failures but wasn't fully complete. State file kept at {state_file_path}")
+             else:
+                  logger.info("Move operation finished; state file was not created or already deleted.")
+
+    logger.info(f"Move Summary: Moved={moved_count}, Failed={failed_count}, Skipped={final_stats['skipped_files']}, Bytes Moved={format_size(total_bytes_moved)}")
+    return final_stats 

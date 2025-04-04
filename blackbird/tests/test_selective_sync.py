@@ -154,10 +154,23 @@ def test_dir(tmp_path):
     )
     
     # Add tracks to index
-    for track in [track1, track2]:
-        index.tracks[track.track_path] = track
-        index.track_by_album.setdefault(track.album_path, set()).add(track.track_path)
-        index.album_by_artist.setdefault(track.artist, set()).add(track.album_path)
+    for i, track in enumerate([track1, track2]):
+        # Add location prefix to file paths for consistency
+        files_with_prefix = {comp: f"Main/{path}" for comp, path in track.files.items()}
+        filesizes_with_prefix = {f"Main/{path}": size for path, size in track.file_sizes.items()}
+        track_info = TrackInfo(
+            track_path=f"Main/{track.track_path}",
+            artist=track.artist,
+            album_path=f"Main/{track.album_path}",
+            cd_number=track.cd_number,
+            base_name=track.base_name,
+            files=files_with_prefix, # Use prefixed paths
+            file_sizes=filesizes_with_prefix # Use prefixed paths
+        )
+        index.tracks[f"Main/{track.track_path}"] = track_info
+        # Update index lookups with prefixed paths
+        index.track_by_album.setdefault(f"Main/{track.album_path}", set()).add(f"Main/{track.track_path}")
+        index.album_by_artist.setdefault(track.artist, set()).add(f"Main/{track.album_path}")
         index.total_size += sum(track.file_sizes.values())
     
     # Save index
@@ -166,10 +179,26 @@ def test_dir(tmp_path):
     return test_dir
 
 @pytest.fixture
-def mock_webdav_client():
-    """Create a mock WebDAV client."""
+def mock_webdav_client(test_dir):
+    """Create a mock WebDAV client with mocked index and schema."""
     client = MagicMock()
     client.download_file = MagicMock()
+
+    # Load the actual index and schema from the test directory
+    dataset = Dataset(test_dir)
+    # Ensure schema and index are loaded/created if they weren't already
+    # dataset.load_schema() # schema is loaded in Dataset.__init__
+    # dataset.load_index() # index is loaded in Dataset.__init__
+
+    # Mock get_index and get_schema to return the loaded objects
+    client.get_index = MagicMock(return_value=dataset.index)
+    client.get_schema = MagicMock(return_value=dataset.schema)
+    
+    # Mock base_url and options needed for state file creation
+    client.base_url = "http://mock-server"
+    client.client = MagicMock()
+    client.client.options = {'webdav_root': '/mock_root/'}
+
     return client
 
 def test_sync_initialization(test_dir):
@@ -184,7 +213,7 @@ def test_sync_with_invalid_component(test_dir, mock_webdav_client):
     """Test sync with invalid component."""
     dataset = Dataset(test_dir)
     sync = DatasetSync(dataset)
-    with pytest.raises(ValueError, match="Invalid components"):
+    with pytest.raises(ValueError, match="Component 'nonexistent' not found in remote schema."):
         sync.sync(mock_webdav_client, components=["nonexistent"])
 
 def test_sync_specific_artist_and_components(test_dir, mock_webdav_client):
@@ -255,8 +284,8 @@ def test_sync_resume(test_dir, mock_webdav_client):
     )
     
     assert stats.total_files == 2
-    assert stats.synced_files == 1  # Only one file should be synced
     assert stats.skipped_files == 1  # One file should be skipped
+    assert stats.downloaded_files == 1 # The other file should be downloaded
     assert stats.failed_files == 0
 
 def test_sync_error_handling(test_dir, mock_webdav_client):

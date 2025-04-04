@@ -85,9 +85,42 @@ def mock_webdav_for_sync():
     # Sync command calls configure_client imported into cli.py
     with patch('blackbird.cli.configure_client') as mock_configure:
         mock_client_instance = MagicMock()
-        mock_client_instance.check_connection.return_value = True # Needed by sync's initial check
+        mock_client_instance.check_connection.return_value = True # Needed by sync command
 
+        # Mock schema
+        mock_schema_content = {"version": "1.0", "components": {
+             "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
+             "instr": {"pattern": "*_instr.mp3", "multiple": False}
+        }}
+        # Create a MagicMock that mimics a DatasetComponentSchema instance
+        mock_schema_object = MagicMock(spec=DatasetComponentSchema)
+        mock_schema_object.schema = mock_schema_content # Set the schema attribute
+        mock_client_instance.get_schema = MagicMock(return_value=mock_schema_object)
+
+        # Mock index
+        mock_track_info = TrackInfo(
+             track_path="Main/Artist1/Album1/Track1", artist="Artist1",
+             album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
+             files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
+             file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
+        )
+        mock_index = DatasetIndex(
+             last_updated=datetime.now(),
+             tracks={"Main/Artist1/Album1/Track1": mock_track_info},
+             track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
+             album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
+             stats_by_location={}
+        )
+        mock_client_instance.get_index = MagicMock(return_value=mock_index)
+        
+        # Mock base_url and options needed for state file creation
+        mock_client_instance.base_url = "http://fake-server"
+        mock_client_instance.client = MagicMock()
+        mock_client_instance.client.options = {'webdav_root': '/dataset/'}
+
+        # Mock download function
         def download_side_effect(remote_path, local_path, file_size=None, **kwargs):
+            print(f"Sync Mock download called for: {remote_path} -> {local_path}")
             if remote_path == ".blackbird/schema.json": 
                 # Create dummy schema content to be "downloaded"
                 schema_content = {"version": "1.0", "components": {
@@ -139,6 +172,37 @@ def mock_webdav_for_clone():
     with patch('blackbird.sync.configure_client') as mock_configure:
         mock_client_instance = MagicMock()
         mock_client_instance.check_connection.return_value = True # Needed by clone_dataset's initial check
+        
+        # Mock schema and index directly (don't rely on download)
+        mock_schema_content = {"version": "1.0", "components": {
+             "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
+             "instr": {"pattern": "*_instr.mp3", "multiple": False}
+        }}
+        # Create a MagicMock that mimics a DatasetComponentSchema instance
+        mock_schema_object = MagicMock(spec=DatasetComponentSchema)
+        mock_schema_object.schema = mock_schema_content # Set the schema attribute
+        mock_client_instance.get_schema = MagicMock(return_value=mock_schema_object)
+
+        mock_track_info = TrackInfo(
+             track_path="Main/Artist1/Album1/Track1", artist="Artist1",
+             album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
+             files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
+             file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
+        )
+        mock_index = DatasetIndex(
+             last_updated=datetime.now(),
+             tracks={"Main/Artist1/Album1/Track1": mock_track_info},
+             track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
+             album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
+             stats_by_location={}
+        )
+        mock_client_instance.get_index = MagicMock(return_value=mock_index)
+        
+        # Mock base_url and options needed for state file creation
+        mock_client_instance.base_url = "http://fake-server"
+        mock_client_instance.client = MagicMock()
+        mock_client_instance.client.options = {'webdav_root': '/dataset/'}
+
 
         # Use the same download logic as the sync mock
         def download_side_effect(remote_path, local_path, file_size=None, **kwargs):

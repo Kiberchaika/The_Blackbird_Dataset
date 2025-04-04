@@ -247,3 +247,31 @@ class Dataset:
             logger.warning("Index accessed before initialization, attempting load/build.")
             self._index = self._load_or_build_index()
         return self._index
+
+    def build_index(self, progress_callback=None):
+        """Build or rebuild the dataset index."""
+        self._index = DatasetIndex.build(self.path, self.schema, progress_callback)
+        self._index.save(self.index_path)
+        return self._index
+
+    @staticmethod
+    def format_size(size_bytes: int) -> str:
+        """Format size in bytes to a human-readable string."""
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024**2:
+            return f"{size_bytes / 1024:.2f} KB"
+        elif size_bytes < 1024**3:
+            return f"{size_bytes / 1024**2:.2f} MB"
+        else:
+            return f"{size_bytes / 1024**3:.2f} GB"
+
+# Helper function to calculate directory size
+def get_dir_size(path='.'):
+    total_size = 0
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            if not os.path.islink(fp):
+                total_size += os.path.getsize(fp)
+    return total_size

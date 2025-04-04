@@ -461,6 +461,7 @@ class DatasetSync:
             profiling = stats.profiling
         else:
             profiling = None
+        state_file_path: Optional[Path] = None # Initialize here
 
         try:
             # 0. Validate target location
@@ -543,8 +544,14 @@ class DatasetSync:
                     if not any(fnmatch.fnmatch(track_info.artist, pattern) for pattern in artists):
                         continue
 
-                # Apply album filter (if provided) - requires symbolic album path matching
-                # TODO: Implement album filtering logic if needed
+                # Apply album filter (if provided)
+                if albums:
+                    # Extract the album base name (e.g., "Album1") from the symbolic path
+                    # Assumes track_info.album_path is like "Location/Artist/Album"
+                    album_base_name = track_info.album_path.split('/')[-1]
+                    # Check if the album base name matches any provided album patterns/names using fnmatch
+                    if not any(fnmatch.fnmatch(album_base_name, pattern) for pattern in albums):
+                        continue # Skip if no album pattern matches
 
                 # Check desired components for this track
                 for comp_name, symbolic_file_path in track_info.files.items():
@@ -628,12 +635,20 @@ class DatasetSync:
                     # --- Resolve local path ---
                     start_resolve = time.time_ns() if profiling else 0
                     try:
-                        # Strip location prefix for remote path used in download
-                        location_prefix = symbolic_remote_path.split('/', 1)[0] + '/'
-                        relative_remote_path = symbolic_remote_path[len(location_prefix):]
+                        # The symbolic_remote_path includes the source location prefix.
+                        # We need to strip this prefix to get the path relative to the dataset root,
+                        # which is then appended to the target_location_path.
+                        parts = symbolic_remote_path.split('/', 1)
+                        if len(parts) == 2:
+                            relative_path_in_dataset = parts[1]
+                        else: # Handle cases with no prefix (shouldn't happen with valid index)
+                            relative_path_in_dataset = symbolic_remote_path
                         
-                        # Use target location and relative path to form local path
-                        local_file_path = target_location_path / relative_remote_path
+                        local_file_path = target_location_path / relative_path_in_dataset
+                        
+                        # The path used for the actual download request should also be relative
+                        relative_remote_path = relative_path_in_dataset 
+
                     except Exception as e:
                          logger.error(f"Error resolving path for {symbolic_remote_path}: {e}")
                          error_message = f"Path resolution error: {e}"
@@ -654,12 +669,20 @@ class DatasetSync:
                         local_size = local_file_path.stat().st_size
                         if local_size == file_size:
                             file_status = SyncState.SKIPPED
-                            skip_file = True
+                            skip_file = True # Set skip_file flag
+                            # Don't proceed to download if skipping
+                            # --- State Update for skipped file ---
+                            file_hash = symbolic_path_to_hash.get(symbolic_remote_path)
+                            op_status: OperationStatus = "done" # Skipped is considered done
+                            if state_file_path and file_hash is not None:
+                                update_operation_state_file(state_file_path, file_hash, op_status)
+                            # --- End State Update ---
+                            return file_status, file_size, None, False # Return immediately
                         else:
                             logger.warning(f"Local file size mismatch for {local_file_path} (local: {local_size}, remote: {file_size}). Re-downloading.")
                     if profiling: profiling.add_timing('check_local_file', time.time_ns() - start_check_local)
 
-                    # Download if not skipping
+                    # Download if not skipping (this block is now only reached if skip_file is False)
                     if not skip_file:
                         download_successful = False
                         try:
@@ -745,8 +768,6 @@ class DatasetSync:
                         batch_stats.failed_files += 1
                     elif status == SyncState.SKIPPED:
                         batch_stats.skipped_files += 1
-                        batch_stats.synced_files += 1 # Skipped files count as successfully synced overall
-                        batch_stats.synced_size += f_size
 
                 return batch_stats, batch_results
 
@@ -827,15 +848,26 @@ class DatasetSync:
                                 f"Calls: {data['calls']}, "
                                 f"Percentage: {percentage:.1f}%")
 
+        except ValueError as ve: # Catch specific ValueErrors first
+             logger.error(f"A configuration or input error occurred during sync: {ve}")
+             # Potentially update stats based on the error type if needed
+             # Mark all as failed? Depends on when the ValueError occurred.
+             stats.failed_files = stats.total_files - stats.synced_files - stats.skipped_files
+             # Keep state file on known configuration errors
+             if 'state_file_path' in locals() and state_file_path and state_file_path.exists():
+                 logger.info(f"Sync failed due to ValueError. Operation state file kept at: {state_file_path}")
+             raise ve # Re-raise the ValueError to be caught by tests or CLI
         except Exception as e:
             logger.exception(f"An unexpected error occurred during sync: {e}")
             stats.failed_files = stats.total_files - stats.synced_files - stats.skipped_files # Mark remaining as failed
             # Decide if state file should be deleted on unexpected error? Probably keep it.
-            if state_file_path and state_file_path.exists():
+            # Use locals() to safely check if state_file_path was assigned
+            if 'state_file_path' in locals() and state_file_path and state_file_path.exists():
                  logger.error(f"Sync failed unexpectedly. Operation state file kept at: {state_file_path}")
-            # Re-raise the exception? Or just return stats? Depending on desired CLI behavior.
-            # raise e 
+            # Optionally re-raise or handle differently depending on desired CLI behavior for unexpected errors
+            # raise e # Re-raising might hide the logger.exception details in some runners
 
+        # Ensure stats are always returned, even if an exception occurred
         return stats
 
 def clone_dataset(
@@ -1117,47 +1149,46 @@ def _process_file_for_resume(
         # 1. Resolve local path in the target location
         # Strip location prefix to get relative path for resolution
         parts = symbolic_remote_path.split('/', 1)
-        if len(parts) != 2:
-             raise ValueError(f"Invalid symbolic path format: {symbolic_remote_path}")
-        relative_path_str = parts[1]
+        if len(parts) == 2:
+            relative_path_in_dataset = parts[1]
+        else: # Handle cases with no prefix (shouldn't happen with valid index)
+            relative_path_in_dataset = symbolic_remote_path
         
-        # Construct symbolic path for the target location
-        symbolic_local_path = f"{target_location_name}/{relative_path_str}"
-        local_path = dataset.resolve_path(symbolic_local_path)
+        local_file_path = dataset.resolve_path(f"{target_location_name}/{relative_path_in_dataset}")
 
         # 2. Check if local file exists and matches size
-        if local_path.exists():
+        if local_file_path.exists():
             try:
-                 local_size = local_path.stat().st_size
+                 local_size = local_file_path.stat().st_size
                  if local_size == expected_size:
                      # logger.debug(f"File already exists and matches size: {local_path}")
                      return symbolic_remote_path, expected_size, SyncState.SKIPPED, None
                  else:
-                     logger.warning(f"File exists but size mismatch for {local_path}. Expected {expected_size}, got {local_size}. Re-downloading.")
+                     logger.warning(f"File exists but size mismatch for {local_file_path}. Expected {expected_size}, got {local_size}. Re-downloading.")
                      # Attempt to remove the incorrect file before redownload
                      try:
                          # Add missing_ok=True
-                         local_path.unlink(missing_ok=True)
+                         local_file_path.unlink(missing_ok=True)
                      except OSError as rm_err:
-                         logger.error(f"Failed to remove existing file with incorrect size {local_path}: {rm_err}")
+                         logger.error(f"Failed to remove existing file with incorrect size {local_file_path}: {rm_err}")
                          return symbolic_remote_path, 0, SyncState.FAILED, f"Failed to remove existing file: {rm_err}"
             except FileNotFoundError:
                 # File vanished between exists() and stat(), proceed to download
                 pass 
             except OSError as stat_err:
-                logger.error(f"Error accessing existing file {local_path}: {stat_err}")
+                logger.error(f"Error accessing existing file {local_file_path}: {stat_err}")
                 return symbolic_remote_path, 0, SyncState.FAILED, f"Error accessing existing file: {stat_err}"
 
         # 3. Download if needed
         # Strip location prefix for remote download path
-        remote_path_for_download = relative_path_str 
+        remote_path_for_download = relative_path_in_dataset 
         
         # Use the internal _download_file method
         sync_instance = DatasetSync(dataset) # Create a temporary instance to access _download_file
         success, downloaded_size = sync_instance._download_file(
             client=client,
             remote_path=remote_path_for_download,
-            local_path=local_path,
+            local_path=local_file_path,
             file_size=expected_size,
             profiling=profiling_stats
         )
@@ -1168,8 +1199,8 @@ def _process_file_for_resume(
             # _download_file should log the specific error
             # Attempt to clean up potentially partial file
             try:
-                 if local_path.exists():
-                     local_path.unlink()
+                 if local_file_path.exists():
+                     local_file_path.unlink()
             except OSError:
                  pass # Ignore cleanup error
             return symbolic_remote_path, 0, SyncState.FAILED, "Download failed"

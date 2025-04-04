@@ -19,6 +19,7 @@ from .locations import LocationsManager, LocationValidationError, SymbolicPathEr
 from .utils import format_size # Assuming format_size exists in utils
 from colorama import Fore
 from .operations import load_operation_state, delete_operation_state, find_latest_state_file, OperationState
+from .mover import move_data  # Import move_data
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -983,18 +984,123 @@ def add_location(dataset_path: str, name: str, location_path: str):
 @click.argument('name')
 @click.confirmation_option(prompt='Are you sure you want to remove this location? This does NOT delete data.')
 def remove_location(dataset_path: str, name: str):
-    """Removes a storage location and saves the configuration."""
+    """Remove a storage location configuration (does not delete data)."""
     try:
-        lm = _get_locations_manager(dataset_path)
-        lm.remove_location(name)
-        lm.save_locations()
-        click.echo(f"Location '{name}' removed successfully.")
-    except LocationValidationError as e:
-        # Use a more specific prefix for removal errors
-        click.echo(f"Error removing location: {e}", err=True)
+        manager = _get_locations_manager(dataset_path)
+        manager.remove_location(name)
+        manager.save_locations()
+        click.echo(f"{Fore.GREEN}Location '{name}' removed successfully.")
+    except (ValueError, KeyError, LocationValidationError) as e:
+        click.echo(f"{Fore.RED}Error: {e}", err=True)
         sys.exit(1)
-    except Exception as e: # Catch unexpected errors during remove/save
-        click.echo(f"An unexpected error occurred while removing location: {e}", err=True)
+    except Exception as e:
+        logger.exception(f"Unexpected error removing location: {e}")
+        click.echo(f"{Fore.RED}An unexpected error occurred: {e}", err=True)
+        sys.exit(1)
+
+@location.command('balance')
+@click.argument('dataset_path', type=click.Path(exists=True, file_okay=False, resolve_path=True))
+@click.argument('source_loc')
+@click.argument('target_loc')
+@click.option('--size', type=float, required=True, help='Approximate size in GB to move.')
+@click.option('--dry-run', is_flag=True, help='Simulate the move without moving files.')
+@click.confirmation_option(prompt='Are you sure you want to move data between these locations?')
+def balance_location(dataset_path: str, source_loc: str, target_loc: str, size: float, dry_run: bool):
+    """Balance storage by moving data between locations to reach a target size."""
+    try:
+        dataset_path_obj = Path(dataset_path)
+        dataset = Dataset(dataset_path_obj)
+        # dataset.load_index() # REMOVED: Index is loaded on Dataset init if available
+
+        if dataset.index is None:
+             click.echo(f"{Fore.RED}Error: Dataset index not found or failed to load at {dataset.index_path}. Please run 'reindex' first.", err=True)
+             sys.exit(1)
+
+        click.echo(f"Attempting to move approximately {size:.2f} GB from '{source_loc}' to '{target_loc}'...")
+
+        move_stats = move_data(
+            dataset=dataset,
+            source_location_name=source_loc,
+            target_location_name=target_loc,
+            size_limit_gb=size,
+            dry_run=dry_run,
+        )
+
+        if dry_run:
+            click.echo(f"\n{Fore.YELLOW}Dry run complete.")
+            click.echo(f"Would have skipped {move_stats['skipped_files']} files.")
+        else:
+            click.echo(f"\n{Fore.GREEN}Move operation complete!")
+            click.echo(f"Moved {move_stats['moved_files']} files ({format_size(move_stats['total_bytes_moved'])}).")
+            click.echo(f"Skipped {move_stats['skipped_files']} files.")
+            click.echo(f"Failed {move_stats['failed_files']} files.")
+            # Trigger re-index after successful move
+            click.echo("Rebuilding index...")
+            dataset.rebuild_index()
+            click.echo("Index rebuilt.")
+
+
+    except (ValueError, KeyError, LocationValidationError, SymbolicPathError) as e:
+        click.echo(f"{Fore.RED}Error: {e}", err=True)
+        sys.exit(1)
+    except RuntimeError as e: # Catch index loading errors specifically
+        click.echo(f"{Fore.RED}Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        logger.exception(f"Unexpected error during balance operation: {e}")
+        click.echo(f"{Fore.RED}An unexpected error occurred: {e}", err=True)
+        sys.exit(1)
+
+@location.command('move-folders')
+@click.argument('dataset_path', type=click.Path(exists=True, file_okay=False, resolve_path=True))
+@click.argument('target_loc')
+@click.argument('folders', nargs=-1, required=True)
+@click.option('--source-location', required=True, help='Name of the source location to move folders from.')
+@click.option('--dry-run', is_flag=True, help='Simulate the move without moving files.')
+@click.confirmation_option(prompt='Are you sure you want to move these specific folders?')
+def move_location_folders(dataset_path: str, target_loc: str, folders: List[str], source_location: str, dry_run: bool):
+    """Move specific folders (relative to source location root) to another location."""
+    try:
+        dataset_path_obj = Path(dataset_path)
+        dataset = Dataset(dataset_path_obj)
+        # dataset.load_index() # REMOVED: Index is loaded on Dataset init if available
+
+        if dataset.index is None:
+             click.echo(f"{Fore.RED}Error: Dataset index not found or failed to load at {dataset.index_path}. Please run 'reindex' first.", err=True)
+             sys.exit(1)
+
+        click.echo(f"Attempting to move folders {folders} from '{source_location}' to '{target_loc}'...")
+
+        move_stats = move_data(
+            dataset=dataset,
+            source_location_name=source_location,
+            target_location_name=target_loc,
+            specific_folders=list(folders),
+            dry_run=dry_run,
+        )
+
+        if dry_run:
+            click.echo(f"\n{Fore.YELLOW}Dry run complete.")
+            click.echo(f"Would have skipped {move_stats['skipped_files']} files.")
+        else:
+            click.echo(f"\n{Fore.GREEN}Move operation complete!")
+            click.echo(f"Moved {move_stats['moved_files']} files ({format_size(move_stats['total_bytes_moved'])}).")
+            click.echo(f"Skipped {move_stats['skipped_files']} files.")
+            click.echo(f"Failed {move_stats['failed_files']} files.")
+            # Trigger re-index after successful move
+            click.echo("Rebuilding index...")
+            dataset.rebuild_index()
+            click.echo("Index rebuilt.")
+
+    except (ValueError, KeyError, LocationValidationError, SymbolicPathError) as e:
+        click.echo(f"{Fore.RED}Error: {e}", err=True)
+        sys.exit(1)
+    except RuntimeError as e: # Catch index loading errors specifically
+        click.echo(f"{Fore.RED}Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        logger.exception(f"Unexpected error during move-folders operation: {e}")
+        click.echo(f"{Fore.RED}An unexpected error occurred: {e}", err=True)
         sys.exit(1)
 
 if __name__ == '__main__':

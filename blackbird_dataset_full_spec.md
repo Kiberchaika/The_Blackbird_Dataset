@@ -435,6 +435,22 @@ blackbird location add /path/to/dataset SSD_Fast /mnt/fast_storage/dataset_part
 
 # Remove a storage location configuration (does not delete data)
 blackbird location remove /path/to/dataset SSD_Fast
+
+# Move files matching specific relative paths from 'SSD_Fast' to 'Main'
+# (Relative paths are based within the location root)
+blackbird location move-folders Main --source-location SSD_Fast \
+    Artist1/Album1 "Artist2/Album B/CD1"
+
+# Balance storage: Move approx. 100GB from 'Main' to 'SSD_Fast'
+# (Attempts to move whole albums/artists if possible)
+blackbird location balance Main SSD_Fast --size 100GB
+
+# Resume the last interrupted move operation
+blackbird resume
+
+# Resume a specific move operation using its state file
+blackbird resume .blackbird/operation_move_1678886400.json
+```
 ```
 *   The dataset index stores file paths symbolically, prepending the location name (e.g., `Main/Artist/...`, `SSD_Fast/Artist/...`).
 *   The default location is named "Main" and points to the dataset root.

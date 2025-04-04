@@ -368,25 +368,23 @@ class DatasetIndex:
                     parts = rel_path_in_loc.parent.parts
 
                     # Validate structure: Artist/Album/[CDx]/track_base_comp.ext
-                    if not parts: # File directly in location root
-                        logger.warning(f"Skipping file in location root (needs Artist/Album structure): {location_name}/{rel_path_in_loc}")
+                    if len(parts) < 2 or len(parts) > 3:
+                        logger.warning(f"Skipping file with unexpected directory structure: {location_name}/{rel_path_in_loc}")
                         continue
                     artist = parts[0]
-                    if len(parts) < 2: # Must have at least Artist/Album
-                        logger.warning(f"Skipping file (needs Artist/Album structure): {location_name}/{rel_path_in_loc}")
-                        continue
                     album = parts[1]
 
                     cd_number = None
                     expected_parent_parts = 2 # Artist/Album
                     # Check for standard CD structure: Artist/Album/CDX/...
-                    if len(parts) >= 3 and parts[2].startswith('CD') and parts[2][2:].isdigit():
+                    if len(parts) == 3 and parts[2].startswith('CD') and parts[2][2:].isdigit():
                         cd_number = parts[2]
                         expected_parent_parts = 3 # Artist/Album/CDX
 
                     # Ensure the file is directly within the expected level (Artist/Album or Artist/Album/CDX)
+                    # This check implicitly handles len(parts) < 2 as well, as expected_parent_parts would be 2 or 3.
                     if len(parts) != expected_parent_parts:
-                        logger.warning(f"Skipping file with unexpected directory structure: {location_name}/{rel_path_in_loc}")
+                        logger.warning(f"Skipping file with unexpected directory structure (not at expected depth): {location_name}/{rel_path_in_loc}")
                         continue
 
                     # Define the unique key for this track instance in this location
@@ -397,6 +395,10 @@ class DatasetIndex:
                     component_counts[comp_name] += 1
                     component_sizes[comp_name] += size
                     index.total_size += size # Aggregate total size for now
+
+                    # Update per-location file count and size stats
+                    location_file_counts[location_name] += 1
+                    location_total_sizes[location_name] += size
 
                 except ValueError as e:
                     logger.warning(f"Path structure error for {abs_path} relative to {location_root}: {e}. Skipping grouping.")

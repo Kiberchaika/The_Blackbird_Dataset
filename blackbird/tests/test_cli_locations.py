@@ -143,7 +143,7 @@ def test_location_remove_non_existent(runner, temp_dataset_dir):
 
     assert result.exit_code != 0
     # Check for the specific error from LocationsManager passed through CLI
-    assert "Error removing location: Location 'NotFound' does not exist" in result.output
+    assert "Error: Location \'NotFound\' does not exist" in result.output
 
 def test_location_remove_main_disallowed(runner, temp_dataset_dir, locations_json_path):
     """Test `location remove` attempting to remove 'Main' (should be allowed if others exist)."""
@@ -173,4 +173,4 @@ def test_location_remove_main_when_only_one(runner, temp_dataset_dir, locations_
     result = runner.invoke(main, ['location', 'remove', str(temp_dataset_dir), "Main"], input='y\n')
 
     assert result.exit_code != 0
-    assert "Error removing location: Cannot remove the default location 'Main' when it is the only location." in result.output 
+    assert "Error: Cannot remove the default location \'Main\' when it is the only location." in result.output 

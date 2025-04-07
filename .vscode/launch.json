@@ -3,7 +3,7 @@
     "configurations": [
         {
             "name": "Python: Debug test_add_component",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "pytest",
             "args": [
@@ -16,7 +16,7 @@
         },
         {
             "name": "Python: Debug test_discover_schema",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "pytest",
             "args": [
@@ -30,7 +30,7 @@
         },
         {
             "name": "Python: Run All Tests",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
             "module": "pytest",
             "args": [
@@ -40,6 +40,19 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "Python: Debug Blackbird Reindex",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "blackbird",
+            "args": [
+                "reindex",
+                "/media/k4_nas/disk1/Datasets/Music_Part1"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}"
         }
     ]
-} 
+}

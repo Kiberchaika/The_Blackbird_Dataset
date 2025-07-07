@@ -153,8 +153,11 @@ class DatasetIndex:
                 continue
             
             # Apply album filter if provided
-            if album and track_info.album_path != album:
-                continue
+            if album:
+                # Extract album name from the full album path (location/artist/album)
+                album_name = track_info.album_path.split('/')[-1]
+                if album_name != album:
+                    continue
             
             # Check if query matches track name
             if (not case_sensitive and query in track_info.base_name.lower()) or \

@@ -890,18 +890,61 @@ def setup(dataset_path: str, port: int, username: Optional[str], password: Optio
 def list():
     """List WebDAV shares created by Blackbird."""
     from .webdav import WebDAVSetup
-    
+
     shares = WebDAVSetup.list_shares()
     if not shares:
         click.echo("No Blackbird WebDAV shares found")
         return
-        
+
     click.echo("\nFound WebDAV shares:")
     for share in shares:
         click.echo(f"\nPort: {share.port}")
         click.echo(f"Path: {share.path}")
         click.echo(f"Status: {'Active' if share.is_running() else 'Inactive'}")
         click.echo(f"Config: {share.config_path}")
+
+@webdav.command()
+@click.argument('port', type=int)
+@click.option('--yes', '-y', is_flag=True, help='Skip confirmation prompt')
+def remove(port: int, yes: bool):
+    """Remove a WebDAV share by port number.
+
+    PORT: The port number of the share to remove (e.g. 8085)
+    """
+    from .webdav import WebDAVSetup
+    from .webdav.config_gen import ConfigGenerator
+
+    # Find the share
+    shares = WebDAVSetup.list_shares()
+    target = None
+    for share in shares:
+        if share.port == port:
+            target = share
+            break
+
+    if target is None:
+        click.echo(f"No Blackbird WebDAV share found on port {port}")
+        sys.exit(1)
+
+    click.echo(f"WebDAV share on port {port}:")
+    click.echo(f"  Path:   {target.path}")
+    click.echo(f"  Config: {target.config_path}")
+    click.echo(f"  Status: {'Active' if target.is_running() else 'Inactive'}")
+
+    if not yes and not click.confirm("\nRemove this WebDAV share?"):
+        click.echo("Cancelled.")
+        return
+
+    config_gen = ConfigGenerator(
+        dataset_path=Path(target.path),
+        port=port,
+    )
+
+    if config_gen.remove():
+        click.echo(f"WebDAV share on port {port} removed successfully.")
+    else:
+        click.echo("Failed to remove WebDAV share.", err=True)
+        sys.exit(1)
 
 @main.group()
 def location():

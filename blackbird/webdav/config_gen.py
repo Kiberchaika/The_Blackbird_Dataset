@@ -80,35 +80,47 @@ class ConfigGenerator:
             str: Complete nginx configuration
         """
         auth_config = self._generate_auth_config() if self.username else ""
-        
+
+        # If auth is configured, require it for write methods instead of denying all
+        if self.username and self.password:
+            auth_file = f"/etc/nginx/.htpasswd_{self.config_name}"
+            write_restriction = f"""
+        # Require authentication for write methods
+        limit_except GET PROPFIND OPTIONS {{
+            auth_basic "Blackbird WebDAV";
+            auth_basic_user_file {auth_file};
+        }}"""
+        else:
+            write_restriction = """
+        # Read-only: deny all write methods
+        limit_except GET PROPFIND OPTIONS {
+            deny all;
+        }"""
+
         return f"""
 server {{
     listen {self.port};
     server_name _;
-    
+
     root {self.dataset_path.absolute()};
     client_max_body_size 0;
-    
+
     location / {{
         # WebDAV methods
         dav_methods PUT DELETE MKCOL COPY MOVE;
         dav_ext_methods PROPFIND OPTIONS;
-        
-        # Read-only access
-        limit_except GET PROPFIND OPTIONS {{
-            deny all;
-        }}
-        
+        {write_restriction}
+
         # Allow directory listing
         autoindex on;
-        
+
         # WebDAV configuration
         create_full_put_path on;
         dav_access user:rw group:rw all:r;
-        
+
         {auth_config}
     }}
-    
+
     access_log /var/log/nginx/webdav-{self.port}.access.log;
     error_log /var/log/nginx/webdav-{self.port}.error.log;
 }}

@@ -1,6 +1,6 @@
-# Blackbird Dataset Manager
+# The Blackbird Dataset
 
-![Blackbird Dataset Manager](https://github.com/Kiberchaika/The_Blackbird_Dataset/blob/0b2b11f6de602f97d1b4f65fdb1164d7cd5e37b0/blackbird.jpg)
+![The Blackbird Dataset](https://github.com/Kiberchaika/The_Blackbird_Dataset/blob/0b2b11f6de602f97d1b4f65fdb1164d7cd5e37b0/blackbird.jpg)
 
 A Python package for managing and synchronizing music datasets with multiple components. Built to handle datasets where each track can have multiple associated files (instrumentals, vocals, MIR data, etc.) while maintaining a clear and consistent structure.
 

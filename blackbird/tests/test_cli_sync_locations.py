@@ -3,7 +3,6 @@ import pytest
 from click.testing import CliRunner
 from pathlib import Path
 import os
-import shutil
 import json
 from unittest.mock import patch, MagicMock
 
@@ -79,172 +78,95 @@ def temp_dataset_with_second_location(temp_dataset_root):
     return dataset_root, second_loc_path # Return root and the path to the second location
 
 
-# Mock WebDAV client for SYNC command tests
+MOCK_SCHEMA_CONTENT = {"version": "1.0", "components": {
+    "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
+    "instr": {"pattern": "*_instr.mp3", "multiple": False}
+}}
+
+MOCK_TRACK_INFO = TrackInfo(
+    track_path="Main/Artist1/Album1/Track1", artist="Artist1",
+    album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
+    files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
+    file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
+)
+
+
+def _make_download_side_effect():
+    """Shared download mock: handles schema, index, and audio file requests."""
+    def download_side_effect(remote_path, local_path, file_size=None, **kwargs):
+        if remote_path == ".blackbird/schema.json":
+            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(local_path, 'w') as f:
+                json.dump(MOCK_SCHEMA_CONTENT, f)
+            return True
+        elif remote_path == ".blackbird/index.pickle":
+            track_info = TrackInfo(
+                track_path="Artist1/Album1/Track1", artist="Artist1",
+                album_path="Artist1/Album1", cd_number=None, base_name="Track1",
+                files={"vocals": "Artist1/Album1/Track1_vocals.mp3"},
+                file_sizes={"Artist1/Album1/Track1_vocals.mp3": 1024}
+            )
+            index = DatasetIndex(
+                last_updated=datetime.now(),
+                tracks={"Artist1/Album1/Track1": track_info},
+                track_by_album={"Artist1/Album1": {"Artist1/Album1/Track1"}},
+                album_by_artist={"Artist1": {"Artist1/Album1"}}, total_size=1024,
+                stats_by_location={}
+            )
+            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+            index.save(local_path)
+            return True
+        elif remote_path == "Artist1/Album1/Track1_vocals.mp3":
+            Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(local_path, 'wb') as f:
+                f.write(b'fake_vocals_data')
+            os.truncate(local_path, 1024)
+            return True
+        else:
+            return False
+    return download_side_effect
+
+
+def _build_mock_client():
+    """Create a MagicMock WebDAV client with schema, index, and download mocks."""
+    mock = MagicMock()
+    mock.check_connection.return_value = True
+    mock.base_url = "http://fake-server"
+    mock.client = MagicMock()
+    mock.client.options = {'webdav_root': '/dataset/'}
+
+    mock_schema_object = MagicMock(spec=DatasetComponentSchema)
+    mock_schema_object.schema = MOCK_SCHEMA_CONTENT
+    mock.get_schema = MagicMock(return_value=mock_schema_object)
+
+    mock_index = DatasetIndex(
+        last_updated=datetime.now(),
+        tracks={"Main/Artist1/Album1/Track1": MOCK_TRACK_INFO},
+        track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
+        album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
+        stats_by_location={}
+    )
+    mock.get_index = MagicMock(return_value=mock_index)
+    mock.download_file.side_effect = _make_download_side_effect()
+    return mock
+
+
 @pytest.fixture
 def mock_webdav_for_sync():
-    # Sync command calls configure_client imported into cli.py
+    """Mock WebDAV client for sync command tests (patches blackbird.cli)."""
     with patch('blackbird.cli.configure_client') as mock_configure:
-        mock_client_instance = MagicMock()
-        mock_client_instance.check_connection.return_value = True # Needed by sync command
+        client = _build_mock_client()
+        mock_configure.return_value = client
+        yield client
 
-        # Mock schema
-        mock_schema_content = {"version": "1.0", "components": {
-             "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
-             "instr": {"pattern": "*_instr.mp3", "multiple": False}
-        }}
-        # Create a MagicMock that mimics a DatasetComponentSchema instance
-        mock_schema_object = MagicMock(spec=DatasetComponentSchema)
-        mock_schema_object.schema = mock_schema_content # Set the schema attribute
-        mock_client_instance.get_schema = MagicMock(return_value=mock_schema_object)
 
-        # Mock index
-        mock_track_info = TrackInfo(
-             track_path="Main/Artist1/Album1/Track1", artist="Artist1",
-             album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
-             files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
-             file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
-        )
-        mock_index = DatasetIndex(
-             last_updated=datetime.now(),
-             tracks={"Main/Artist1/Album1/Track1": mock_track_info},
-             track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
-             album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
-             stats_by_location={}
-        )
-        mock_client_instance.get_index = MagicMock(return_value=mock_index)
-        
-        # Mock base_url and options needed for state file creation
-        mock_client_instance.base_url = "http://fake-server"
-        mock_client_instance.client = MagicMock()
-        mock_client_instance.client.options = {'webdav_root': '/dataset/'}
-
-        # Mock download function
-        def download_side_effect(remote_path, local_path, file_size=None, **kwargs):
-            print(f"Sync Mock download called for: {remote_path} -> {local_path}")
-            if remote_path == ".blackbird/schema.json": 
-                # Create dummy schema content to be "downloaded"
-                schema_content = {"version": "1.0", "components": {
-                     "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
-                     "instr": {"pattern": "*_instr.mp3", "multiple": False}
-                }}
-                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(local_path, 'w') as f:
-                    json.dump(schema_content, f)
-                return True
-            elif remote_path == ".blackbird/index.pickle": 
-                 # Create dummy index content to be "downloaded"
-                 track_info = TrackInfo(
-                     track_path="Artist1/Album1/Track1", artist="Artist1", 
-                     album_path="Artist1/Album1", cd_number=None, base_name="Track1",
-                     files={"vocals": "Artist1/Album1/Track1_vocals.mp3"}, 
-                     file_sizes={"Artist1/Album1/Track1_vocals.mp3": 1024} 
-                 )
-                 index = DatasetIndex(
-                     last_updated=datetime.now(),
-                     tracks={"Artist1/Album1/Track1": track_info},
-                     track_by_album={"Artist1/Album1": {"Artist1/Album1/Track1"}},
-                     album_by_artist={"Artist1": {"Artist1/Album1"}}, total_size=1024,
-                     stats_by_location={} 
-                 )
-                 Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                 index.save(local_path)
-                 return True
-            elif remote_path == "Artist1/Album1/Track1_vocals.mp3": 
-                # Simulate downloading the actual file
-                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(local_path, 'wb') as f:
-                    f.write(b'fake_vocals_data') # Write dummy data
-                # Crucially, set the size correctly after writing
-                os.truncate(local_path, 1024)
-                return True
-            else:
-                print(f"Mock download called for unexpected path: {remote_path}")
-                return False
-
-        mock_client_instance.download_file.side_effect = download_side_effect
-        mock_configure.return_value = mock_client_instance
-        yield mock_client_instance
-
-# Mock WebDAV client for CLONE command tests
 @pytest.fixture
 def mock_webdav_for_clone():
-    # Clone command calls clone_dataset, which calls configure_client imported into sync.py
+    """Mock WebDAV client for clone command tests (patches blackbird.sync)."""
     with patch('blackbird.sync.configure_client') as mock_configure:
-        mock_client_instance = MagicMock()
-        mock_client_instance.check_connection.return_value = True # Needed by clone_dataset's initial check
-        
-        # Mock schema and index directly (don't rely on download)
-        mock_schema_content = {"version": "1.0", "components": {
-             "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
-             "instr": {"pattern": "*_instr.mp3", "multiple": False}
-        }}
-        # Create a MagicMock that mimics a DatasetComponentSchema instance
-        mock_schema_object = MagicMock(spec=DatasetComponentSchema)
-        mock_schema_object.schema = mock_schema_content # Set the schema attribute
-        mock_client_instance.get_schema = MagicMock(return_value=mock_schema_object)
-
-        mock_track_info = TrackInfo(
-             track_path="Main/Artist1/Album1/Track1", artist="Artist1",
-             album_path="Main/Artist1/Album1", cd_number=None, base_name="Track1",
-             files={"vocals": "Main/Artist1/Album1/Track1_vocals.mp3"},
-             file_sizes={"Main/Artist1/Album1/Track1_vocals.mp3": 1024}
-        )
-        mock_index = DatasetIndex(
-             last_updated=datetime.now(),
-             tracks={"Main/Artist1/Album1/Track1": mock_track_info},
-             track_by_album={"Main/Artist1/Album1": {"Main/Artist1/Album1/Track1"}},
-             album_by_artist={"Artist1": {"Main/Artist1/Album1"}}, total_size=1024,
-             stats_by_location={}
-        )
-        mock_client_instance.get_index = MagicMock(return_value=mock_index)
-        
-        # Mock base_url and options needed for state file creation
-        mock_client_instance.base_url = "http://fake-server"
-        mock_client_instance.client = MagicMock()
-        mock_client_instance.client.options = {'webdav_root': '/dataset/'}
-
-
-        # Use the same download logic as the sync mock
-        def download_side_effect(remote_path, local_path, file_size=None, **kwargs):
-            if remote_path == ".blackbird/schema.json":
-                schema_content = {"version": "1.0", "components": {
-                     "vocals": {"pattern": "*_vocals.mp3", "multiple": False},
-                     "instr": {"pattern": "*_instr.mp3", "multiple": False}
-                }}
-                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(local_path, 'w') as f:
-                    json.dump(schema_content, f)
-                return True
-            elif remote_path == ".blackbird/index.pickle":
-                 track_info = TrackInfo(
-                     track_path="Artist1/Album1/Track1", artist="Artist1",
-                     album_path="Artist1/Album1", cd_number=None, base_name="Track1",
-                     files={"vocals": "Artist1/Album1/Track1_vocals.mp3"},
-                     file_sizes={"Artist1/Album1/Track1_vocals.mp3": 1024}
-                 )
-                 index = DatasetIndex(
-                     last_updated=datetime.now(),
-                     tracks={"Artist1/Album1/Track1": track_info},
-                     track_by_album={"Artist1/Album1": {"Artist1/Album1/Track1"}},
-                     album_by_artist={"Artist1": {"Artist1/Album1"}}, total_size=1024,
-                     stats_by_location={}
-                 )
-                 Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                 index.save(local_path)
-                 return True
-            elif remote_path == "Artist1/Album1/Track1_vocals.mp3":
-                Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-                with open(local_path, 'wb') as f:
-                    f.write(b'fake_vocals_data')
-                os.truncate(local_path, 1024)
-                return True
-            else:
-                print(f"Clone Mock download called for unexpected path: {remote_path}")
-                return False
-
-        mock_client_instance.download_file.side_effect = download_side_effect
-        mock_configure.return_value = mock_client_instance
-        yield mock_client_instance
+        client = _build_mock_client()
+        mock_configure.return_value = client
+        yield client
 
 
 # Test clone to default location

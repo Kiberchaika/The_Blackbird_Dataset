@@ -4,10 +4,6 @@ from datetime import datetime
 from blackbird.index import DatasetIndex, TrackInfo
 import json
 
-# Define specific paths for testing
-EXISTING_TEST_DIR_1 = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_2")
-EXISTING_TEST_DIR_2 = Path("/home/k4/Projects/The_Blackbird_Dataset/test_dataset_folder_3")
-
 @pytest.fixture
 def multi_location_dataset(tmp_path):
     """Sets up a temporary dataset structure with multiple locations."""
@@ -15,11 +11,17 @@ def multi_location_dataset(tmp_path):
     blackbird_dir = dataset_root / ".blackbird"
     blackbird_dir.mkdir(parents=True)
 
+    # Create additional location directories in tmp_path
+    loc2_dir = tmp_path / "loc2_data"
+    loc3_dir = tmp_path / "loc3_data"
+    loc2_dir.mkdir()
+    loc3_dir.mkdir()
+
     # Create locations.json
     locations_data = {
         "Main": str(dataset_root),
-        "Loc2": str(EXISTING_TEST_DIR_1),
-        "Loc3": str(EXISTING_TEST_DIR_2) # Using another existing dir for diversity
+        "Loc2": str(loc2_dir),
+        "Loc3": str(loc3_dir),
     }
     locations_json_path = blackbird_dir / "locations.json"
     locations_json_path.write_text(json.dumps(locations_data))
@@ -38,18 +40,17 @@ def multi_location_dataset(tmp_path):
     }
     schema_path.write_text(json.dumps(schema_data))
 
-    # Create some structure and files in 'Main' location
+    # Create structure in Main
     (dataset_root / "Artist1" / "Album1").mkdir(parents=True)
     (dataset_root / "Artist1" / "Album1" / "Track1_instrumental.wav").touch()
 
-    # Ensure structure exists in external locations (the fixture for locations handles dir creation)
-    # We assume EXISTING_TEST_DIR_1 and _2 have some structure for real tests,
-    # but for the index structure itself, we only need the paths defined.
-    (EXISTING_TEST_DIR_1 / "Artist1" / "Album2").mkdir(parents=True, exist_ok=True)
-    (EXISTING_TEST_DIR_1 / "Artist1" / "Album2" / "Track2_instrumental.wav").touch()
-    (EXISTING_TEST_DIR_2 / "Artist2" / "Album3").mkdir(parents=True, exist_ok=True)
-    (EXISTING_TEST_DIR_2 / "Artist2" / "Album3" / "Track3_instrumental.wav").touch()
+    # Create structure in Loc2
+    (loc2_dir / "Artist1" / "Album2").mkdir(parents=True)
+    (loc2_dir / "Artist1" / "Album2" / "Track2_instrumental.wav").touch()
 
+    # Create structure in Loc3
+    (loc3_dir / "Artist2" / "Album3").mkdir(parents=True)
+    (loc3_dir / "Artist2" / "Album3" / "Track3_instrumental.wav").touch()
 
     return dataset_root, locations_data
 

@@ -2,10 +2,7 @@
 
 import pytest
 import os
-import shutil
-import tempfile
 import requests
-import time
 import socket
 from pathlib import Path
 from typing import Optional
@@ -83,34 +80,33 @@ class TestWebDAVSync:
     """Test WebDAV sync functionality."""
 
     @pytest.fixture
-    def mock_dataset(self):
+    def mock_dataset(self, tmp_path):
         """Create a mock dataset for testing."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            dataset_path = Path(temp_dir) / "test_dataset"
-            
-            # Create dataset structure
-            artists = ["Artist1", "Artist2"]
-            albums = ["Album1", "Album2"]
-            components = [
-                ("instrumental", "_instrumental.mp3"),
-                ("vocals", "_vocals_noreverb.mp3"),
-                ("mir", ".mir.json")
-            ]
-            
-            # Create files
-            for artist in artists:
-                for album in albums:
-                    album_path = dataset_path / artist / album
-                    album_path.mkdir(parents=True)
-                    
-                    # Create track files
-                    for track_num in range(1, 3):
-                        base_name = f"track{track_num}"
-                        for comp_name, suffix in components:
-                            file_path = album_path / f"{base_name}{suffix}"
-                            file_path.write_text(f"Mock {comp_name} content for {base_name}")
-            
-            yield dataset_path
+        dataset_path = tmp_path / "test_dataset"
+
+        # Create dataset structure
+        artists = ["Artist1", "Artist2"]
+        albums = ["Album1", "Album2"]
+        components = [
+            ("instrumental", "_instrumental.mp3"),
+            ("vocals", "_vocals_noreverb.mp3"),
+            ("mir", ".mir.json")
+        ]
+
+        # Create files
+        for artist in artists:
+            for album in albums:
+                album_path = dataset_path / artist / album
+                album_path.mkdir(parents=True)
+
+                # Create track files
+                for track_num in range(1, 3):
+                    base_name = f"track{track_num}"
+                    for comp_name, suffix in components:
+                        file_path = album_path / f"{base_name}{suffix}"
+                        file_path.write_text(f"Mock {comp_name} content for {base_name}")
+
+        yield dataset_path
 
     @pytest.fixture
     def webdav_server(self, mock_dataset, mock_nginx):

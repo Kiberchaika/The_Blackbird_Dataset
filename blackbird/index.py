@@ -37,6 +37,7 @@ class DatasetIndex:
     track_by_album: Dict[str, Set[str]]  # album_path -> set of track_paths
     album_by_artist: Dict[str, Set[str]]  # artist_name -> set of album_paths
     total_size: int  # Total size of all indexed files
+    total_files: int = 0  # Total number of indexed files
     stats_by_location: Dict[str, Dict] = field(default_factory=dict)  # location_name -> {file_count, total_size, track_count, album_count, artist_count}
     file_info_by_hash: Dict[int, Tuple[str, int]] = field(default_factory=dict) # hash(symbolic_file_path) -> (symbolic_file_path, size)
     version: str = "1.0"  # Move version with default value to the end
@@ -535,6 +536,7 @@ class DatasetIndex:
                  "artist_count": len(location_artists[loc_name]),
              }
 
+        index.total_files = sum(location_file_counts.values())
         index.last_updated = datetime.now()
         logger.info("Index build complete.")
         return index

@@ -214,14 +214,27 @@ The schema validation process ensures:
 Example validation:
 ```python
 schema = DatasetComponentSchema(dataset_path)
+
+# Validate schema structure and directory layout
 result = schema.validate()
 
 if result.is_valid:
     print("Schema validation successful")
+    print(f"Artists: {result.stats['directory_structure']['artists']}")
+    print(f"Albums: {result.stats['directory_structure']['albums']}")
+else:
+    print("Validation errors:")
+    for error in result.errors:
+        print(f"- {error}")
+
+# Validate schema against actual data (checks file matching and constraints)
+result = schema.validate_against_data()
+
+if result.is_valid:
     print(f"Total files: {result.stats['total_files']}")
     print(f"Matched files: {result.stats['matched_files']}")
 else:
-    print("Validation errors:")
+    print("Data validation errors:")
     for error in result.errors:
         print(f"- {error}")
 ```
@@ -754,6 +767,7 @@ class DatasetIndex:
     track_by_album: Dict[str, Set[str]]  # symbolic_album_path -> set of symbolic_track_paths
     album_by_artist: Dict[str, Set[str]]  # artist_name -> set of symbolic_album_paths
     total_size: int  # Total size of all indexed files
+    total_files: int = 0  # Total number of indexed files
     stats_by_location: Dict[str, Dict] = field(default_factory=dict) # location_name -> {file_count, total_size, track_count, album_count, artist_count}
     file_info_by_hash: Dict[int, Tuple[str, int]] = field(default_factory=dict) # hash(symbolic_file_path) -> (symbolic_file_path, size)
     version: str = "1.0"

@@ -14,15 +14,18 @@ logger = logging.getLogger(__name__)
 class SchemaDiscoveryResult:
     """Result of schema discovery."""
 
-    def __init__(self, is_valid: bool, stats: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, is_valid: bool, stats: Optional[Dict[str, Any]] = None,
+                 errors: Optional[List[str]] = None) -> None:
         """Initialize schema discovery result.
 
         Args:
             is_valid: Whether the schema discovery was successful
             stats: Optional statistics about discovered components
+            errors: Optional list of error messages
         """
         self.is_valid = is_valid
         self.stats = stats or {}
+        self.errors = errors or []
 
 @dataclass
 class ValidationResult:

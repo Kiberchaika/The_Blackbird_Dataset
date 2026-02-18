@@ -62,22 +62,14 @@ def discover_and_save_schema(dataset_path: Path, num_artists: Optional[int] = No
                 print(f"  Description: {config['description']}")
                 
             # Print corresponding statistics
-            if name in result.stats:
-                stats = result.stats[name]
+            if "components" in result.stats and name in result.stats["components"]:
+                stats = result.stats["components"][name]
                 print("\n  Statistics:")
                 print(f"    Files found: {stats['file_count']}")
                 print(f"    Track coverage: {stats['track_coverage']*100:.1f}%")
                 print(f"    Unique tracks: {stats['unique_tracks']}")
-                print(f"    Files per track: {stats['min_files_per_track']} to {stats['max_files_per_track']}")
-                print(f"    Extensions: {', '.join(stats['extensions'])}")
                 print(f"    Has sections: {stats['has_sections']}")
-        
-        print("\nDirectory Structure:")
-        print(json.dumps(schema.schema["structure"], indent=2))
-        
-        print("\nSync Configuration:")
-        print(json.dumps(schema.schema["sync"], indent=2))
-        
+
         if not test_run:
             print(f"\nSchema saved to {schema_file}")
         else:
@@ -86,11 +78,6 @@ def discover_and_save_schema(dataset_path: Path, num_artists: Optional[int] = No
         print("\nSchema discovery failed with errors:")
         for error in result.errors:
             print(f"- {error}")
-        
-        if result.warnings:
-            print("\nWarnings:")
-            for warning in result.warnings:
-                print(f"- {warning}")
 
 def main():
     parser = argparse.ArgumentParser(description='Discover and save schema for a Blackbird dataset')

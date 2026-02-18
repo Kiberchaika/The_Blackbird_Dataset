@@ -3,6 +3,7 @@ from typing import List, Dict, Set, Optional, Callable
 from .schema import DatasetComponentSchema, ValidationResult
 from .index import DatasetIndex, TrackInfo
 import logging
+import os
 from collections import defaultdict
 from tqdm import tqdm
 from .locations import LocationsManager

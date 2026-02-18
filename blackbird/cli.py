@@ -480,7 +480,7 @@ def stats(dataset_path: str, missing: Optional[str]):
             click.echo(f"Total tracks: {len(index.tracks)}")
             click.echo(f"Total artists: {len(index.album_by_artist)}")
             click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
-            click.echo(f"Total files: {index.total_files if hasattr(index, 'total_files') else 'N/A'}") # Handle older index versions
+            click.echo(f"Total files: {index.total_files}")
             click.echo(f"Total size: {index.total_size / (1024*1024*1024):.2f} GB")
 
             # Print per-location statistics if available
@@ -561,7 +561,7 @@ def stats(dataset_path: str, missing: Optional[str]):
             click.echo(f"Total tracks: {len(index.tracks)}")
             click.echo(f"Total artists: {len(index.album_by_artist)}")
             click.echo(f"Total albums: {sum(len(albums) for albums in index.album_by_artist.values())}")
-            click.echo(f"Total files: {index.total_files if hasattr(index, 'total_files') else 'N/A'}") # Handle older index versions
+            click.echo(f"Total files: {index.total_files}")
             click.echo(f"Total size: {index.total_size / (1024*1024*1024):.2f} GB")
 
             # Print per-location statistics if available

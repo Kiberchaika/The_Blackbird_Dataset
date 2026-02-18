@@ -10,7 +10,7 @@ from pathlib import Path
 from datetime import datetime
 from unittest.mock import MagicMock, patch, PropertyMock
 
-from blackbird.streaming import StreamingPipeline, PipelineItem, _PipelineState
+from blackbird.streaming import StreamingPipeline, PipelineItem, _PipelineState, _UploadTask
 from blackbird.index import DatasetIndex, TrackInfo
 
 
@@ -413,3 +413,216 @@ class TestPipelineIntegration:
             # At least some items should have been received (not all 5 because first fails)
             assert items_received >= 1
             assert pipeline._failed_downloads >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests: Upload methods
+# ---------------------------------------------------------------------------
+
+class TestUploadWithRetry:
+    """Tests for StreamingPipeline._upload_with_retry."""
+
+    def _make_pipeline(self, work_dir):
+        p = StreamingPipeline(url="webdav://host/data", work_dir=str(work_dir))
+        p._client = MagicMock()
+        return p
+
+    def test_succeeds_on_first_attempt(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.return_value = True
+
+        result = pipeline._upload_with_retry(Path("/tmp/f.json"), "a/b/f.json")
+
+        assert result is True
+        assert pipeline._client.upload_file.call_count == 1
+
+    def test_succeeds_after_transient_failure(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.side_effect = [False, True]
+
+        with patch("blackbird.streaming.time.sleep"):
+            result = pipeline._upload_with_retry(Path("/tmp/f.json"), "a/b/f.json")
+
+        assert result is True
+        assert pipeline._client.upload_file.call_count == 2
+
+    def test_succeeds_after_exception(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.side_effect = [ConnectionError("timeout"), True]
+
+        with patch("blackbird.streaming.time.sleep"):
+            result = pipeline._upload_with_retry(Path("/tmp/f.json"), "a/b/f.json")
+
+        assert result is True
+        assert pipeline._client.upload_file.call_count == 2
+
+    def test_fails_after_max_retries(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.return_value = False
+
+        with patch("blackbird.streaming.time.sleep"):
+            result = pipeline._upload_with_retry(Path("/tmp/f.json"), "a/b/f.json")
+
+        assert result is False
+        assert pipeline._client.upload_file.call_count == 3  # MAX_RETRIES
+
+    def test_aborts_on_shutdown(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._upload_shutdown.set()
+        pipeline._client.upload_file.return_value = False
+
+        result = pipeline._upload_with_retry(Path("/tmp/f.json"), "a/b/f.json")
+
+        assert result is False
+
+
+class TestProcessUploadTask:
+    """Tests for StreamingPipeline._process_upload_task."""
+
+    def _make_pipeline(self, work_dir):
+        p = StreamingPipeline(url="webdav://host/data", work_dir=str(work_dir))
+        p._client = MagicMock()
+        p._state = _PipelineState(url="webdav://host/data")
+        p._state_path = work_dir / ".pipeline_state.json"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        p._state.save(p._state_path)
+        return p
+
+    def test_successful_upload_cleans_up_and_marks_processed(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.return_value = True
+
+        # Create local files that should be cleaned up after upload
+        src_file = work_dir / "downloads" / "ArtistA" / "Album1" / "track.mp3"
+        src_file.parent.mkdir(parents=True, exist_ok=True)
+        src_file.write_bytes(b"audio")
+
+        result_file = work_dir / "results" / "track.mir.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_file.write_text('{"bpm": 120}')
+
+        item = PipelineItem(
+            local_path=src_file,
+            remote_path="ArtistA/Album1/track.mp3",
+            metadata={"artist": "ArtistA", "album": "Album1", "track": "track", "component": "original"},
+        )
+        task = _UploadTask(item=item, result_path=result_file, remote_name="track.mir.json")
+
+        pipeline._process_upload_task(task)
+
+        # Upload was called with correct remote path
+        pipeline._client.upload_file.assert_called_once_with(
+            result_file, "ArtistA/Album1/track.mir.json"
+        )
+        # Local files cleaned up
+        assert not src_file.exists()
+        assert not result_file.exists()
+        # State updated
+        assert "ArtistA/Album1/track.mp3" in pipeline._state.processed
+        assert pipeline._uploaded_count == 1
+        assert pipeline._failed_uploads == 0
+
+    def test_failed_upload_increments_failure_count(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.return_value = False
+
+        src_file = work_dir / "downloads" / "track.mp3"
+        src_file.parent.mkdir(parents=True, exist_ok=True)
+        src_file.write_bytes(b"audio")
+
+        result_file = work_dir / "results" / "track.mir.json"
+        result_file.parent.mkdir(parents=True, exist_ok=True)
+        result_file.write_text('{}')
+
+        item = PipelineItem(
+            local_path=src_file,
+            remote_path="ArtistA/Album1/track.mp3",
+            metadata={},
+        )
+        task = _UploadTask(item=item, result_path=result_file, remote_name="track.mir.json")
+
+        with patch("blackbird.streaming.time.sleep"):
+            pipeline._process_upload_task(task)
+
+        assert pipeline._failed_uploads == 1
+        assert pipeline._uploaded_count == 0
+        # Local files NOT cleaned up on failure
+        assert src_file.exists()
+        assert result_file.exists()
+        # Not marked as processed
+        assert "ArtistA/Album1/track.mp3" not in pipeline._state.processed
+
+    def test_removes_entry_from_pending_uploads(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._client.upload_file.return_value = True
+
+        # Pre-populate pending uploads in state
+        pipeline._state.pending_uploads = [
+            {"local": "/tmp/track.mir.json", "remote": "ArtistA/Album1/track.mir.json"},
+            {"local": "/tmp/other.json", "remote": "ArtistB/Album2/other.json"},
+        ]
+        pipeline._state.save(pipeline._state_path)
+
+        src_file = work_dir / "track.mp3"
+        src_file.write_bytes(b"audio")
+        result_file = work_dir / "track.mir.json"
+        result_file.write_text('{}')
+
+        item = PipelineItem(
+            local_path=src_file,
+            remote_path="ArtistA/Album1/track.mp3",
+            metadata={},
+        )
+        task = _UploadTask(item=item, result_path=result_file, remote_name="track.mir.json")
+
+        pipeline._process_upload_task(task)
+
+        # Only the matching entry removed; the other remains
+        assert len(pipeline._state.pending_uploads) == 1
+        assert pipeline._state.pending_uploads[0]["remote"] == "ArtistB/Album2/other.json"
+
+
+class TestRemovePendingUpload:
+    """Tests for StreamingPipeline._remove_pending_upload."""
+
+    def _make_pipeline(self, work_dir):
+        p = StreamingPipeline(url="webdav://host/data", work_dir=str(work_dir))
+        p._state = _PipelineState(url="webdav://host/data")
+        p._state_path = work_dir / ".pipeline_state.json"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        p._state.save(p._state_path)
+        return p
+
+    def test_removes_matching_entry(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._state.pending_uploads = [
+            {"local": "/tmp/a.json", "remote": "X/a.json"},
+            {"local": "/tmp/b.json", "remote": "Y/b.json"},
+        ]
+
+        pipeline._remove_pending_upload("X/a.json")
+
+        assert len(pipeline._state.pending_uploads) == 1
+        assert pipeline._state.pending_uploads[0]["remote"] == "Y/b.json"
+
+    def test_no_op_when_not_found(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._state.pending_uploads = [
+            {"local": "/tmp/a.json", "remote": "X/a.json"},
+        ]
+
+        pipeline._remove_pending_upload("nonexistent/path.json")
+
+        assert len(pipeline._state.pending_uploads) == 1
+
+    def test_persists_to_disk(self, work_dir):
+        pipeline = self._make_pipeline(work_dir)
+        pipeline._state.pending_uploads = [
+            {"local": "/tmp/a.json", "remote": "X/a.json"},
+        ]
+
+        pipeline._remove_pending_upload("X/a.json")
+
+        # Reload from disk and verify
+        reloaded = _PipelineState.load(pipeline._state_path)
+        assert len(reloaded.pending_uploads) == 0

@@ -307,6 +307,76 @@ class WebDAVClient:
             logger.error(f"Failed to download {remote_path}: {e}")
             return False
     
+    def upload_file(self, local_path: Path, remote_path: str) -> bool:
+        """Upload a file to the WebDAV server using PUT.
+
+        Args:
+            local_path: Local path to the file to upload
+            remote_path: Path on the server where the file should be stored
+
+        Returns:
+            True if the upload was successful, False otherwise
+        """
+        try:
+            if isinstance(local_path, str):
+                local_path = Path(local_path)
+
+            if not local_path.exists():
+                logger.error(f"Local file not found for upload: {local_path}")
+                return False
+
+            encoded_path = self._encode_url_path(remote_path)
+            url = f"{self.base_url}/{encoded_path.lstrip('/')}"
+
+            # Ensure remote parent directories exist via MKCOL
+            self._ensure_remote_dirs(remote_path)
+
+            with open(local_path, 'rb') as f:
+                file_data = f.read()
+
+            if self.use_http2 and self.http2_client:
+                response = self.http2_client.put(url, content=file_data)
+                if response.status_code in (200, 201, 204):
+                    return True
+                else:
+                    logger.error(f"HTTP/2 upload failed with status {response.status_code}: {url}")
+                    return False
+            else:
+                response = self.session.put(url, data=file_data)
+                if response.status_code in (200, 201, 204):
+                    return True
+                else:
+                    logger.error(f"HTTP upload failed with status {response.status_code}: {url}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to upload {local_path} to {remote_path}: {e}")
+            return False
+
+    def _ensure_remote_dirs(self, remote_path: str) -> None:
+        """Create remote directories via MKCOL if they don't exist.
+
+        Args:
+            remote_path: Full remote path; parent directories will be created
+        """
+        parts = remote_path.strip('/').split('/')
+        if len(parts) <= 1:
+            return
+
+        # Build up directory paths and create each one
+        current = ""
+        for part in parts[:-1]:  # Skip the filename
+            current = f"{current}/{part}" if current else part
+            encoded = self._encode_url_path(current)
+            url = f"{self.base_url}/{encoded}"
+            try:
+                if self.use_http2 and self.http2_client:
+                    self.http2_client.request('MKCOL', url)
+                else:
+                    self.session.request('MKCOL', url)
+            except Exception:
+                pass  # Directory may already exist, MKCOL returns 405 in that case
+
     def check_connection(self) -> bool:
         """Check if the connection to the WebDAV server is working."""
         return self.client.check_connection()
@@ -1214,8 +1284,3 @@ def _process_file_for_resume(
         logger.error(f"Unexpected error processing {symbolic_remote_path} during resume: {error_msg}", exc_info=True)
         return symbolic_remote_path, 0, SyncState.FAILED, error_msg
 
-
-# Keep configure_client at the end if it's a standalone utility function
-def configure_client(url: str, use_http2: bool = False, connection_pool_size: int = 10) -> WebDAVClient:
-    """Configure WebDAV client from URL."""
-    return WebDAVClient(url, use_http2=use_http2, connection_pool_size=connection_pool_size) 

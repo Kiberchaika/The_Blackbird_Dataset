@@ -251,7 +251,7 @@ class Dataset:
     def build_index(self, progress_callback=None):
         """Build or rebuild the dataset index."""
         self._index = DatasetIndex.build(self.path, self.schema, progress_callback)
-        self._index.save(self.index_path)
+        self._index.save(self.path / ".blackbird" / "index.pickle")
         return self._index
 
     @staticmethod

@@ -25,7 +25,9 @@ class TestSystemOps:
 
     def test_check_dependencies_all_present(self):
         """Test dependency checking when all dependencies are present."""
-        with patch("shutil.which", return_value="/usr/sbin/nginx"), \
+        mock_dpkg = MagicMock(stdout="ii  nginx  1.24.0-2  amd64  high performance web server", returncode=0)
+        with patch("subprocess.run", return_value=mock_dpkg), \
+             patch("shutil.which", return_value="/usr/sbin/nginx"), \
              patch("os.path.exists", return_value=True):
             installed, missing = SystemOps.check_dependencies()
             assert installed is True

@@ -132,13 +132,31 @@ class TestWebDAVSync:
         mock_nginx.password = "testpass"
         
         # Mock sudo operations
+        # subprocess.run must return stdout="active\n" so config.apply() sees nginx as running
+        mock_run_result = MagicMock(returncode=0, stdout="active\n")
+        # subprocess.Popen is used by config.apply() to write config via "sudo tee"
+        mock_popen_inst = MagicMock()
+        mock_popen_inst.communicate.return_value = ("", "")
+        mock_popen_inst.returncode = 0
+
+        # Selective Path.exists mock: return False only for /etc/nginx paths
+        # (the symlink check in config_gen.py), real exists() for everything else
+        _original_exists = Path.exists
+
+        def _mock_exists(path_self):
+            if '/etc/nginx' in str(path_self):
+                return False
+            return _original_exists(path_self)
+
         with patch("blackbird.webdav.system_ops.SystemOps.check_ubuntu", return_value=True), \
              patch("blackbird.webdav.system_ops.SystemOps.check_dependencies", return_value=(True, [])), \
              patch("blackbird.webdav.system_ops.SystemOps.check_system_resources",
                    return_value={"disk": True, "memory": True}), \
              patch("blackbird.webdav.system_ops.SystemOps.setup_permissions_and_firewall", return_value=True), \
              patch("blackbird.webdav.system_ops.SystemOps.run_with_sudo", return_value=True), \
-             patch("subprocess.run", return_value=MagicMock(returncode=0)), \
+             patch("subprocess.run", return_value=mock_run_result), \
+             patch("subprocess.Popen", return_value=mock_popen_inst), \
+             patch("pathlib.Path.exists", _mock_exists), \
              patch("socket.socket") as mock_socket:
             
             # Mock socket for port check
